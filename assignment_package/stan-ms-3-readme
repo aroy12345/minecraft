@@ -1,0 +1,36 @@
+All the features I have implemented in this projects:
+
+1. Procedural Terrain Generation (ms1)
+2. Texture and Texture Animation (ms2) 
+3. Day And Night Shift, Weather System (ms3) 
+
+Day And Night Shift Implementation: 
+I created a class called skyrenderer that uses a ray-casting appraoch. The sky is rendered as a full-screen quad with a fragment shader that computes
+color values based on the view direction and time of day. The skyrenderer classs manages time progression and sky colors in different times, it interpolates
+between color sets based on current time, it also updates the sun position based on time. I then used two shaders, sky.vert.glsl, sky.frag.glsl where the vertex 
+shader transforms a full-screen quad, and the fragment shader performs ray calculations. I use worley based FBM noise to generate clouds.
+
+Challenge: Avoiding NaN values in the cloud pattern, it causes my program to crash many times, I added a safeguard to clamp denominator values to prevent division
+by zero.
+
+Weather System Implementation: 
+I created a weathersystem calss that manages weather state and genereate and updates weather particles. I also use the variable created in the weather system class
+to add gray gradient to my sky when its rainy or snowy. I created two shaders where the vertex shader handles particle movement and billboarding and the fragment shader
+creates different appearances for rain and snow. The precipitation is rendered using a particle system where the particles are generated around the player, I used instanced
+rendering for efficiency. Each particle has its position, velocity, size and lifetime passed into the shader. The movement is affected by wind and gravity. Also use its
+coordinate to determine whether it collides with blocks in the terrain so that it disappears.
+
+Challenge: I dont know why the particles like raindrops and snowflakes are not showing on the screen, I still cant fix it and make it show..
+
+Controls
+
+T: Set time to morning (6 AM)
+Y: Set time to noon (12 PM)
+U: Set time to sunset (6 PM)
+I: Set time to midnight (12 AM)
+1: Set weather to clear
+2: Set weather to rain
+3: Set weather to snow
+
+
+

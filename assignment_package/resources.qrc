@@ -1,0 +1,6 @@
+<RCC>
+    <qresource prefix="/">
+        <file>baah.wav</file>
+        <file>sounds/Sheep2.ogg</file>
+    </qresource>
+</RCC>

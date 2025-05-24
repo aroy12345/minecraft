@@ -1,0 +1,41 @@
+I'm explaining my methodology for the assignment here:
+    1. For Processinputs:
+        a. Input bundle contains inputs from different keys which get actiavted when a key pressed
+        b. Based on the input pressed, acceleration inputs change in the respecitive axis
+        c. In flightmode, acceleration changes purely based on its m_forward, m_up and m_right axis
+        d. But, in ground mode, these axes are normalized considering the y movement = 0
+
+    2. ComputePhysics
+        a. outputs my displacement/final position based on the acceleration inputs from Processinputs
+        b. In flightmode, the displacement is just calculated based on acceleration and the time interval along with the addition
+           of the drag force which imdepes my velocity every time the function is called
+        c. In ground mode, I also have an addition of gravity: -9.8 and collisions with terrain
+        d. Collisions are calculated in the following manner:
+            i. I first choose a resolution that helps me progress to a point until collsision
+            ii. For this I cast a ray from the 4 corners of my 2 blocks, totally making it about 12 points and check for collision in the direction of the ray for these points
+            ii. This is also done in each axis independtly
+            iii. If the block on the position calculated based on accel and vel has a non empty block thats not water, then I would stop just before the collision
+            iv. Otherwise, I would just keep moving based on my velocity.
+            v. If I am stuck in all three axis, I just move a bit to give a sliding apprearance.
+        e. Based on all of these I now output my displacement
+        f. The final dispalacement is used to update my player's position
+
+    3. Mouse controls:
+        a. I calculate the amount of rotation based on the movement of my mouse from the centre of the display
+        b. And reorient it back to centre of the mouse.
+
+    4. WSDAEQ Controls:
+        a. In flightmode and groundmode: W->forward
+                                         S->backward
+                                         D->right
+                                         A->left
+
+        b. In flightmode only:           E->Up
+                                         Q->Down
+
+    5. left mouseclick: removes block if within 3units
+       right mouseclick: adds block adj to the block pointing at, if within 3 blocks
+
+    6. Space bar to make the player jump, the player can also move while in air before it lands to enable jumping across blocks
+
+    7. Note: Added one feature to change the shooting Range for adding/Removing blocks; by clicking Key_R: your shooting range increases by 1 unit; default is 3 units

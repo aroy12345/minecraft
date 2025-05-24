@@ -1,0 +1,47 @@
+Sheep NPCs (Passive AI with Random Motion)
+
+This project includes a custom implementation of sheep-like NPCs that roam around the terrain with simple
+passive behavior.
+
+Each sheep is a separate Entity with its own motion logic. The system includes:
+
+    1. Randomized wandering: Sheep will periodically choose a new direction (left, right, or reverse),
+    or occasionally pause to simulate a natural, idle behavior.
+
+    2. Terrain-aware physics: Sheep walk along the voxel terrain and jump over small obstacles if necessary.
+    (inspired by the exact vibe of player physics)
+    Collision detection uses a bounding box approximation and handles both horizontal and vertical movement.
+
+    3. Spawn logic: Sheep are not spawned all at once. Instead, a small number (2–3) are spawned gradually per
+    frame after the terrain in that area has been generated and buffered, ensuring that sheep
+    never appear floating(at least try to) or embedded in terrain.
+
+    4. Color variation: Sheep are randomly assigned slight difference in wool color
+    (e.g., off-white, pink, light brown, gray) at spawn time.
+
+    5. Made this system design to be lightweight and visually natural while demonstrating basic AI movement and world interaction.
+
+Multithreaded Sound Playback (Baah Sound)
+
+To reduce performance stuttering and avoid simultaneous overlapping sound artifacts,
+sheep sound playback is handled in a separate thread using QSoundEffect.
+
+Key features:
+
+    I first tried just implementing it on the main thread, but after every baah, I was able to see a
+    visible lag in everything for a split second, hence decided to just use a seperate thread
+    and this boosted performance by a lot !
+
+    1. Global sheep sound: Only one sheep instance (typically the first in the list) is responsible for
+    triggering the baah sound. This avoids a situation where all sheep play their sounds simultaneously.
+
+    2. Cooldown-based timing: The sound is played at randomized intervals (e.g., every 40–90 seconds),
+    ensuring it feels ambient rather than repetitive.
+
+    3. Audio: Sound playback is offloaded to a custom AudioThread, which waits for a play request via a
+    condition variable and plays the sound on demand. This prevents the main rendering thread from stalling or
+    glitching due to audio buffer delays.
+
+    4. Sound warm-up: The sound is preloaded silently once at startup to reduce latency on the first audible playback.
+
+    5. This setup allows background ambient sound effects to run smoothly without affecting gameplay performance or framerate.

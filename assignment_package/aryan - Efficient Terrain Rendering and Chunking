@@ -1,0 +1,46 @@
+The goal of this implementation is to significantly improve rendering efficiency by drawing the terrain on a per-chunk basis rather than per-block.
+Implementation Details
+
+Chunk as Drawable:
+
+The Chunk class now inherits from the Drawable class (scene/chunk.h). This allows each Chunk object to manage its own Vertex Buffer Objects (VBOs) and be rendered with a single draw call.
+
+
+Optimized VBO Generation 
+
+The Chunk::createVBOdata function (scene/chunk.cpp) generates vertex data only for block faces that are visible.
+A face is considered visible if it lies on the boundary between a non-EMPTY block and an EMPTY block.
+This check is performed for all six faces of each block within the chunk.
+Crucially, the check correctly handles faces at the edges of the chunk  by querying the neighboring chunk's block type using Chunk::getAdjacentChunkBlockAt. This ensures seamless geometry generation between adjacent chunks.
+
+
+Interleaved VBO Format:
+
+Instead of using separate VBOs for position, normal, and color data, the Chunk stores all vertex attribute data in a single, interleaved VBO (BufferType::INTERLEAVED).
+The data for each vertex is packed together in the format: Position (vec4), Normal (vec4), Color (vec4).
+Indices for drawing triangles are stored in a separate index buffer (BufferType::INDEX), as required by OpenGL.
+A helper function, Chunk::bufferInterleaved (scene/chunk.cpp), takes the generated interleaved vertex data and index data (as std::vectors) and buffers them into the appropriate VBOs managed by the Chunk instance. This function is called at the end of createVBOdata.
+
+
+Interleaved Drawing
+
+A new drawing function, ShaderProgram::drawInterleaved (shaderprogram.cpp), was added to handle rendering Drawables that use the interleaved VBO format.
+This function correctly configures the vertex attribute pointers (glVertexAttribPointer) by specifying the appropriate stride (the byte offset between consecutive vertices) and offset (the byte offset of the first component of each attribute within a vertex) for the interleaved data structure.
+The main Terrain::draw function (scene/terrain.cpp) now iterates through the visible chunks and calls shaderProgram->drawInterleaved(*chunk) for each one.
+
+
+Dynamic Terrain Expansion 
+
+To create an infinitely explorable world, the Terrain class implements dynamic chunk generation in the checkAndCreateNewChunks function (scene/terrain.cpp).
+This function is called every frame from MyGL::tick (mygl.cpp).
+It determines the player's current chunk coordinates.
+It checks if the player is close to the edge of the currently loaded terrain (specifically, near a chunk boundary where no adjacent chunk exists in that direction).
+If a neighboring chunk is needed, Terrain::instantiateChunkAt is called to create a new Chunk object, populate it with block data (based on procedural generation logic within instantiateChunkAt), and link it with its existing neighbors.
+Immediately after instantiation, newChunk->createVBOdata() is called to generate the VBO data for the new chunk, making it ready for rendering in subsequent frames.
+The system also implements a larger-scale zone generation (64x64 blocks, composed of 4x4 chunks). When the player enters a new zone, all 16 chunks within that zone are generated and their VBOs created if they don't already exist.
+For this milestone, chunks are only added; they are not unloaded when far from the player.
+
+
+
+Result
+By rendering entire chunks with single draw calls and only generating geometry for visible faces, this implementation drastically reduces the number of draw calls per frame compared to the base code, leading to significantly improved rendering performance and enabling a larger, more complex game world.
