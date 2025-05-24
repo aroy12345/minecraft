@@ -82,10 +82,6 @@ A sophisticated 3D voxel-based game engine inspired by Minecraft, built with Qt,
    ./MiniMinecraft
    ```
 
-### Platform-Specific Notes
-- **Linux/Mac**: Stack protector enabled for additional security
-- **Windows**: Requires OpenGL32 and GLU32 libraries
-- **Address Sanitizer**: Can be enabled for debugging memory issues
 
 ## 🎯 Controls
 
@@ -104,26 +100,7 @@ A sophisticated 3D voxel-based game engine inspired by Minecraft, built with Qt,
 - **F**: Toggle between flight and ground mode
 - **ESC**: Access game menu
 
-## 📁 Project Structure
 
-```
-assignment_package/
-├── src/
-│   ├── scene/           # Game entities and world management
-│   │   ├── player.cpp   # Player physics and controls
-│   │   ├── terrain.cpp  # Terrain generation and chunk management
-│   │   ├── chunk.cpp    # Individual chunk rendering and VBO management
-│   │   └── sheep.cpp    # NPC sheep implementation
-│   ├── mygl.cpp         # Main OpenGL context and rendering loop
-│   ├── shaderprogram.cpp # Shader management and rendering functions
-│   └── biomegenerator.h # Procedural terrain generation algorithms
-├── glsl/                # GLSL shader files
-│   ├── lambert.*        # Terrain rendering shaders
-│   ├── sky.*           # Sky rendering shaders
-│   └── weather.*       # Weather effect shaders
-├── textures/           # Game textures and normal maps
-└── sounds/             # Audio files for game effects
-```
 
 ## 🎨 Technical Highlights
 
@@ -141,9 +118,6 @@ The terrain system uses a sophisticated multi-noise approach:
 - **Transparent rendering pass**: Proper alpha sorting for water blocks
 
 
-## 📄 License
-
-This project is developed for educational purposes as part of a computer graphics course.
 
 ## 🚀 Future Enhancements
 
