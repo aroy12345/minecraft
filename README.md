@@ -140,13 +140,6 @@ The terrain system uses a sophisticated multi-noise approach:
 - **Dynamic LOD**: Chunks generated based on player proximity
 - **Transparent rendering pass**: Proper alpha sorting for water blocks
 
-## 🤝 Contributors
-
-This project was developed as a collaborative effort with specialized contributions:
-- **Aryan**: Efficient terrain rendering and chunking system
-- **Nithasree**: Player physics and collision detection
-- **Stan**: Terrain generation algorithms and texture implementation
-- **Nitha**: Multithreading, NPC system, and audio integration
 
 ## 📄 License
 
