@@ -4,128 +4,49 @@
 #include <glm/gtc/random.hpp>
 #include "terrain.h"
 #include <cmath>
-#include <iostream>
-#include <QThread>
-#include <QMutex>
-#include <atomic>
 
 // Static member initialization
 QSoundEffect* Sheep::s_baahSound = nullptr;
 float Sheep::s_timeSinceLastBaah = 0.f;
 float Sheep::s_baahCooldown = glm::linearRand(30.f, 60.f);
-bool Sheep::s_soundInitialized = false;
-std::atomic<bool> Sheep::s_playRequested(false);
-AudioThread* Sheep::s_audioThread = nullptr;
 
-// Audio Thread Class Implementation
-AudioThread::AudioThread() : QThread(), m_running(true) {
-    // Initialize the sound in the new thread's constructor
-    m_sound = new QSoundEffect();
-}
-
-AudioThread::~AudioThread() {
-    // Signal thread to stop and wait for it
-    m_running = false;
-    m_waitCondition.wakeAll();
-    wait();
-
-    // Clean up resources
-    delete m_sound;
-}
-
-void AudioThread::run() {
-    // This method runs in a separate thread
-
-    // Set thread priority
-    setPriority(QThread::HighPriority);
-
-    // Initialize the sound in the thread context
-    m_sound->setSource(QUrl("qrc:/sounds/baah.wav"));
-    m_sound->setLoopCount(1);
-    m_sound->setVolume(0.15f);
-
-    // Warm up the sound system (load into memory)
-    m_sound->setMuted(true);
-    m_sound->play();
-    msleep(100); // Wait for buffer to load
-    m_sound->stop();
-    m_sound->setMuted(false);
-
-    QMutex mutex;
-
-    // Thread loop
-    while (m_running) {
-        mutex.lock();
-        // Wait for play request or thread termination
-        m_waitCondition.wait(&mutex);
-        mutex.unlock();
-
-        if (!m_running) break;
-
-        // Play the sound if requested
-        if (Sheep::s_playRequested.load()) {
-            m_sound->play();
-            Sheep::s_playRequested.store(false);
-        }
+void Sheep::initializeAudio() {
+    if (!s_baahSound) {
+        s_baahSound = new QSoundEffect();
+        s_baahSound->setSource(QUrl("qrc:/sounds/baah.wav"));
+        s_baahSound->setLoopCount(1);
+        s_baahSound->setVolume(0.15f);
     }
 }
 
-void AudioThread::requestPlay() {
-    Sheep::s_playRequested.store(true);
-    m_waitCondition.wakeAll();
-}
-
-// Sheep implementation
-void Sheep::initializeAudioThread() {
-    if (!s_soundInitialized) {
-        // Create the audio thread only once
-        s_audioThread = new AudioThread();
-        s_audioThread->start();
-        s_soundInitialized = true;
-    }
-}
-
-void Sheep::cleanupAudioThread() {
-    if (s_audioThread) {
-        delete s_audioThread;
-        s_audioThread = nullptr;
-        s_soundInitialized = false;
-    }
+void Sheep::cleanupAudio() {
+    delete s_baahSound;
+    s_baahSound = nullptr;
 }
 
 
 Sheep::Sheep(glm::vec3 pos, const Terrain& terrain)
     : Entity(pos), mcr_terrain(terrain),
     m_velocity(0.f), m_acceleration(0.f),
+    m_onground(true),
+    m_moveSpeed(1.2f),
+    m_bodyWidth(1.4f * 0.5f),
     m_timeSinceLastTurn(0.f),
     m_randomTurnInterval(2.f),
-    m_onground(true),
     m_turning(false),
     m_targetAngle(0.f),
     m_turnSpeed(0.f),
-    m_moveSpeed(1.2f),
-    m_bodyWidth(1.4f * 0.5f),
-    m_bodyDepth(0.9f * 0.5f),
     m_pausing(false),
     m_pauseTime(0.f),
     m_pauseDuration(0.f)
-{
-    // Initialize the audio thread if not already done
-    if (!s_soundInitialized) {
-        initializeAudioThread();
-    }
-}
+{}
 
-void Sheep::tick(float dT, InputBundle& input) {
-
-    if (this == mcr_terrain.m_sheep[0].get() && s_soundInitialized) {
+void Sheep::tick(float dT, InputBundle&) {
+    // The first sheep drives the shared bleat cooldown
+    if (s_baahSound && !mcr_terrain.m_sheep.empty() && this == mcr_terrain.m_sheep[0].get()) {
         s_timeSinceLastBaah += dT;
-
-        if (s_timeSinceLastBaah >= s_baahCooldown && !s_playRequested.load()) {
-            // Request sound playback in the audio thread
-            s_audioThread->requestPlay();
-
-            // Reset timer and cooldown
+        if (s_timeSinceLastBaah >= s_baahCooldown) {
+            s_baahSound->play();
             s_timeSinceLastBaah = 0.f;
             s_baahCooldown = glm::linearRand(10.f, 20.f);
         }
@@ -212,6 +133,21 @@ void Sheep::applyPhysics(float dT) {
     // m_velocity.x *= DRAG;
     // m_velocity.z *= DRAG;
 
+    // De-embed: if streaming terrain grew around the sheep, or it wandered
+    // into a wall it couldn't resolve, lift it to the surface so it is never
+    // left wedged inside blocks.
+    auto solidCell = [this](glm::vec3 q) -> bool {
+        if (!mcr_terrain.hasChunkAt(floor(q.x), floor(q.z))) return false;
+        BlockType b = mcr_terrain.getGlobalBlockAt(floor(q.x), floor(q.y), floor(q.z));
+        return b != EMPTY && b != WATER && b != LAVA;
+    };
+    int embedGuard = 0;
+    while (embedGuard++ < 40 && (solidCell(m_position + glm::vec3(0.f, -0.6f, 0.f)) ||
+                                 solidCell(m_position + glm::vec3(0.f, 0.3f, 0.f)))) {
+        m_position.y += 1.f;
+        m_velocity.y = 0.f;
+    }
+
     // Predict displacement
     glm::vec3 displacement = m_velocity * dT;
 
@@ -255,7 +191,9 @@ void Sheep::applyPhysics(float dT) {
                     floor(testPoint.z)
                     );
 
-                if (block == EMPTY || block == WATER) {
+                // Water counts as solid for sheep so they can't wander in
+                // and sink; the obstacle check below turns them away instead
+                if (block == EMPTY) {
                     distanceTravelled += resolution;
                     continue;
                 } else {
@@ -278,8 +216,11 @@ void Sheep::applyPhysics(float dT) {
         if (axis == 1) moveUpAmount = actualDistance;
     }
 
-    if (stuck && m_velocity != glm::vec3(0.f)) {
-        moveUpAmount += 0.01f;
+    // If genuinely wedged against a wall, turn around next tick instead of
+    // grinding upward into the terrain (the old 0.01 nudge slowly climbed
+    // sheep through solid blocks).
+    if (stuck && glm::length(glm::vec3(m_velocity.x, 0.f, m_velocity.z)) > 0.01f) {
+        m_timeSinceLastTurn = m_randomTurnInterval;   // provoke a turn
     }
 
     moveUpLocal(moveUpAmount);
@@ -295,6 +236,14 @@ bool Sheep::detectObstacleAhead() {
     if (!mcr_terrain.hasChunkAt(floor(forwardPos.x), floor(forwardPos.z)))
         return false;
 
+    // Turn away from water rather than jumping onto it
+    BlockType ahead = mcr_terrain.getGlobalBlockAt(
+        floor(forwardPos.x), floor(m_position.y) - 1, floor(forwardPos.z));
+    if (ahead == WATER || ahead == LAVA) {
+        chooseNewAction();
+        return false;
+    }
+
     for (int y = 0; y <= 1; ++y) {
         BlockType block = mcr_terrain.getGlobalBlockAt(
             floor(forwardPos.x),
@@ -302,16 +251,20 @@ bool Sheep::detectObstacleAhead() {
             floor(forwardPos.z)
             );
 
-        if (block != EMPTY && block != WATER) {
+        if (block == WATER || block == LAVA) {
+            chooseNewAction(); // never wade in - turn
+            return false;
+        }
+        if (block != EMPTY) {
             BlockType above = mcr_terrain.getGlobalBlockAt(
                 floor(forwardPos.x),
                 floor(m_position.y) + y + 1,
                 floor(forwardPos.z)
                 );
-            if (above == EMPTY || above == WATER) {
+            if (above == EMPTY) {
                 return true; // jump over
             } else {
-                chooseNewAction(); // can't jump — turn
+                chooseNewAction(); // can't jump - turn
                 return false;
             }
         }
