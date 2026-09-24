@@ -37,12 +37,12 @@ int main(int argc, char *argv[])
 
     QSurfaceFormat::setDefaultFormat(format);
     debugFormatVersion();
-    Sheep::initializeAudioThread();
+    Sheep::initializeAudio();
 
     MainWindow w;
     w.show();
 
-    return a.exec();
-    Sheep::cleanupAudioThread();
-
+    int result = a.exec();
+    Sheep::cleanupAudio();
+    return result;
 }

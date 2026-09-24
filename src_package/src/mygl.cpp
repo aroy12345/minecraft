@@ -1,25 +1,69 @@
 #include "mygl.h"
 #include <glm_includes.h>
-#include <iostream>
+
 #include <QApplication>
 #include <QKeyEvent>
 #include <QDateTime>
-#include <QPainter>
 #include <QDir>
-#include <QDebug>
-#include "scene/terrain.h"
-#include "weathersystem.h"
+#include <QFile>
+#include <QFileDialog>
+#include <QTextStream>
 
+#ifdef Q_OS_MACOS
+// Raw hardware mouse deltas for smooth FPS-style camera look
+#include <ApplicationServices/ApplicationServices.h>
+#endif
 
+namespace {
+// Half-width of the box of chunks drawn around the player. Kept just above
+// the fog end distance so terrain fades out before the world edge shows.
+constexpr int DRAW_RADIUS = 176;
+// The sun's shadow map only covers a ~130-block box around the player, so
+// the shadow pass draws a smaller radius than the far view distance.
+constexpr int SHADOW_RADIUS = 128;
+constexpr float FOG_END = 174.f;
+
+}
 
 MyGL::MyGL(QWidget *parent)
     : OpenGLContext(parent),
     m_worldAxes(this),
-    m_progLambert(this), m_progFlat(this), m_progInstanced(this), m_progSky(this),
+    m_progLambert(this), m_progFlat(this), m_progPost(this), m_progSky(this),
     m_progWeather(this),
-    m_terrain(this), m_player(glm::vec3(48.f, 180.f, 48.f), m_terrain),
+    // Spawn just above the grass at a meadow's edge overlooking the beach
+    // and open ocean, so the view the player actually settles into is a
+    // scenic coastline (the look direction is set in initializeGL)
+    m_terrain(this), m_player(glm::vec3(112.f, 147.f, 366.f), m_terrain),
     m_sky(this),
     m_weather(this),
+    m_frameBuffer(this, 1, 1, 1),
+    m_quad(this),
+    m_progShadow(this),
+    m_shadowMap(this, 2048),
+    m_thirdPerson(false),
+    m_tpDistance(3.f),
+    m_solidFade(0.f),
+    m_playerSpeed(0.f),
+    m_armSwing(0.f),
+    m_prevPlayerPos(0.f),
+    m_blockHighlight(this),
+    m_hotbarPages{{{GRASS, DIRT, STONE, SAND, WOOD, PLANK, BRICK, WATER},
+                   {WIRE_OFF, TORCH, LEVER_OFF, LAMP_OFF, LEAF, SNOW, STONE, WATER}}},
+    m_hotbar(m_hotbarPages[0]),
+    m_hotbarPage(0),
+    m_selectedSlot(2),
+    m_hudDirty(true),
+    m_hudFrame(this),
+    m_hudIcons(this),
+    m_progHud(this),
+    m_craftOpen(false),
+    m_craftSel(0),
+    m_craftDirty(true),
+    m_craftFrame(this),
+    m_craftIcons(this),
+    m_mouseCaptured(false),
+    m_showAxes(false),
+    m_pilotStage(0),
     m_prevTime(QDateTime::currentMSecsSinceEpoch()),
     texture(nullptr),
     m_currentTime(0.f),
@@ -31,23 +75,92 @@ MyGL::MyGL(QWidget *parent)
     m_timer.start(16);
     setFocusPolicy(Qt::ClickFocus);
     setMouseTracking(true); // MyGL will track the mouse's movements even if a mouse button is not pressed
-    setCursor(Qt::CrossCursor);
+    setCursor(Qt::ArrowCursor);
 
+    // Start with a gentle downward tilt so terrain, not sky, greets the player
+    m_player.rotateOnRightLocal(-12.f);
 
+    // Start on foot like Minecraft survival - F lifts off into flight.
+    // (The physics tick below holds the player until the ground exists.)
+    m_player.setFlightMode(false);
+
+    // Starting supplies: basics to build with; everything else is mined
+    // or crafted (see Crafting::RECIPES)
+    for (BlockType t : {GRASS, DIRT, STONE, SAND}) m_inventory[t] = 32;
+    m_inventory[WOOD] = 16;
+    m_inventory[LEAF] = 16;
+    m_inventory[SNOW] = 16;
+
+    // MC_TP=1 starts in third-person view (demo/verification aid)
+    if (qEnvironmentVariableIsSet("MC_TP")) m_thirdPerson = true;
+
+    // MC_SPAWN="x,y,z[,pitch[,yaw]]" overrides the spawn point - handy for
+    // headless verification and for framing demo-video shots
+    if (qEnvironmentVariableIsSet("MC_SPAWN")) {
+        const QStringList p = qEnvironmentVariable("MC_SPAWN").split(',');
+        // A trailing "g" scouts a grounded landing (the player falls to the
+        // surface); otherwise the requested flight pose is held.
+        if (!(p.size() >= 6 && p[5] == "g")) m_player.setFlightMode(true);
+        if (p.size() >= 3) {
+            glm::vec3 target(p[0].toFloat(), p[1].toFloat(), p[2].toFloat());
+            m_player.moveAlongVector(target - m_player.mcr_position);
+        }
+        if (p.size() >= 4) m_player.rotateOnRightLocal(p[3].toFloat());
+        if (p.size() >= 5) m_player.rotateOnUpGlobal(p[4].toFloat());
+    } else if (!qEnvironmentVariableIsSet("MC_DEMO") &&
+               !qEnvironmentVariableIsSet("MC_PILOT")) {
+        // Look out over the meadow toward the beach and open ocean for a
+        // scenic opening frame: grass foreground, sand, then sea fading to a
+        // foggy horizon. The scripted demo and self-test set their own
+        // poses, so this only affects normal play.
+        m_player.rotateOnRightLocal(-4.f);
+        m_player.rotateOnUpGlobal(270.f);
+    }
 }
 
 MyGL::~MyGL() {
     makeCurrent();
     glDeleteVertexArrays(1, &vao);
-    if (texture) {
-        delete texture;
-    }
+    m_frameBuffer.destroy();
+    delete texture;
 }
 
 void MyGL::moveMouseToCenter() {
     QCursor::setPos(this->mapToGlobal(QPoint(width() / 2, height() / 2)));
 }
-// Update the initializeGL method in mygl.cpp to initialize our weather components
+
+// Minecraft-style cursor grab. On macOS the cursor is decoupled from the
+// physical mouse entirely (CGAssociateMouseAndMouseCursorPosition) and the
+// camera is driven from raw hardware deltas each tick - no cursor warping,
+// no jitter. Elsewhere we fall back to hide-and-recenter.
+void MyGL::setMouseCaptured(bool captured) {
+    m_mouseCaptured = captured;
+    if (captured) {
+        setCursor(Qt::BlankCursor);
+#ifdef Q_OS_MACOS
+        CGAssociateMouseAndMouseCursorPosition(false);
+        int32_t dx, dy;
+        CGGetLastMouseDelta(&dx, &dy); // discard any pending delta
+#else
+        moveMouseToCenter();
+#endif
+    } else {
+#ifdef Q_OS_MACOS
+        CGAssociateMouseAndMouseCursorPosition(true);
+#endif
+        setCursor(Qt::ArrowCursor);
+    }
+}
+
+void MyGL::focusOutEvent(QFocusEvent *) {
+    // Don't fight the user for the cursor when they switch apps, and drop
+    // any held movement keys so the player doesn't keep walking. The
+    // scripted self-test owns the inputs, so its runs stay undisturbed.
+    setMouseCaptured(false);
+    if (!qEnvironmentVariableIsSet("MC_PILOT")) {
+        m_inputs = InputBundle();
+    }
+}
 
 void MyGL::initializeGL()
 {
@@ -66,62 +179,71 @@ void MyGL::initializeGL()
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
-    // Set the color with which the screen is filled at the start of each render call.
-    // This is now handled by the sky rendering
-    // glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
-    // printGLErrorLog();
-
     // Create a Vertex Attribute Object
     glGenVertexArrays(1, &vao);
-    //Create the instance of the world axes
+    // Create the instance of the world axes
     m_worldAxes.createVBOdata();
-
-       m_sheepCube.createVBOdata();
+    m_sheepCube.createVBOdata();
+    m_blockHighlight.createVBOdata();
+    // Full-screen quad for the post-process pass
+    m_quad.createVBOdata();
 
     // Create and set up the diffuse shader
     m_progLambert.create(":/glsl/lambert.vert.glsl", ":/glsl/lambert.frag.glsl");
     // Create and set up the flat lighting shader
     m_progFlat.create(":/glsl/flat.vert.glsl", ":/glsl/flat.frag.glsl");
-    m_progInstanced.create(":/glsl/instanced.vert.glsl", ":/glsl/lambert.frag.glsl");
+    // Create and set up the post-process shader
+    m_progPost.create(":/glsl/post.vert.glsl", ":/glsl/post.frag.glsl");
+    // Depth-only shader + buffer for shadow mapping
+    m_progShadow.create(":/glsl/shadow.vert.glsl", ":/glsl/shadow.frag.glsl");
+    m_shadowMap.create();
     // Create and set up the sky shader
     m_progSky.create(":/glsl/sky.vert.glsl", ":/glsl/sky.frag.glsl");
     // Create and set up the weather shaders
     m_progWeather.create(":/glsl/weather.vert.glsl", ":/glsl/weather.frag.glsl");
+    // HUD shader for the hotbar icons
+    m_progHud.create(":/glsl/hud.vert.glsl", ":/glsl/hud.frag.glsl");
 
     // We have to have a VAO bound in OpenGL 3.2 Core. But if we're not
     // using multiple VAOs, we can just bind one once.
     glBindVertexArray(vao);
 
-    // Load texture
-    QDir currentDir = QDir::current();
-    qDebug() << "Current directory using Qt:" << currentDir.absolutePath();
-
+    // Load the block texture atlas
     QImage textureImage(":/textures/minecraft_textures_all.png");
     if (textureImage.isNull()) {
-        qDebug() << "Failed to load texture!";
-    } else {
-        qDebug() << "Texture loaded successfully!";
-        texture = new QOpenGLTexture(textureImage.mirrored());
-        texture->setMinificationFilter(QOpenGLTexture::Nearest);
-        texture->setMagnificationFilter(QOpenGLTexture::Nearest);
-        texture->setWrapMode(QOpenGLTexture::Repeat);
+        qFatal("Failed to load the block texture atlas");
     }
+#if QT_VERSION >= QT_VERSION_CHECK(6, 9, 0)
+    texture = new QOpenGLTexture(textureImage.flipped(Qt::Vertical));
+#else
+    texture = new QOpenGLTexture(textureImage.mirrored());
+#endif
+    texture->setMinificationFilter(QOpenGLTexture::Nearest);
+    texture->setMagnificationFilter(QOpenGLTexture::Nearest);
+    texture->setWrapMode(QOpenGLTexture::Repeat);
 
+    // Offscreen frame buffer for the post-process pipeline
+    m_frameBuffer.resize(width(), height(), devicePixelRatio());
+    m_frameBuffer.create();
 
     // Create sky VBO data
     m_sky.createVBOdata();
 
     // Initialize weather system
     m_weather.initialize();
-
-
     m_sky.setWeatherSystem(&m_weather);
 
+    // MC_TIME="hours" pins the starting time of day (demo/verification aid)
+    if (qEnvironmentVariableIsSet("MC_TIME")) {
+        m_sky.setTimeOfDay(qEnvironmentVariable("MC_TIME").toFloat());
+    }
 
-    // Generate procedural terrain
-    m_terrain.CreateTestScene();
+    // Build the immediate spawn neighborhood synchronously so the very
+    // first frame already shows solid ground, not empty sky, then kick off
+    // async streaming for everything beyond it.
+    m_terrain.primeSpawnArea(m_player.mcr_position);
+    m_terrain.updateTerrain(m_player.mcr_position);
 }
-
 
 void MyGL::resizeGL(int w, int h) {
     //This code sets the concatenated view and perspective projection matrices used for
@@ -131,25 +253,41 @@ void MyGL::resizeGL(int w, int h) {
     // Upload the view-projection matrix to our shaders (i.e. onto the graphics card)
     m_progLambert.setUnifMat4("u_ViewProj", viewproj);
     m_progFlat.setUnifMat4("u_ViewProj", viewproj);
-    m_progInstanced.setUnifMat4("u_ViewProj", viewproj);
 
     // Set the inverse view-projection matrix for the sky shader
-    glm::mat4 invViewProj = glm::inverse(viewproj);
-    m_progSky.setInvViewProj(invViewProj);
+    m_progSky.setInvViewProj(glm::inverse(viewproj));
+
+    m_hudDirty = true; // hotbar layout depends on the aspect ratio
+
+    // The offscreen buffer must track the widget's size
+    m_frameBuffer.destroy();
+    m_frameBuffer.resize(w, h, devicePixelRatio());
+    m_frameBuffer.create();
 
     printGLErrorLog();
 }
 
-// Update the tick method in mygl.cpp to update our weather system
-
 void MyGL::tick() {
+    // Terrain uploads and painting need a live GL context
+    if (!isValid()) {
+        return;
+    }
+    makeCurrent();
+
     // Get current time for delta time calculation
     qint64 currentTime = QDateTime::currentMSecsSinceEpoch();
     float dT = (currentTime - m_prevTime) / 1000.f;
     m_prevTime = currentTime;
+    // MC_FIXEDSTEP: offline-render mode for the demo recorder. Every tick
+    // advances the simulation exactly 1/30s no matter how long the frame
+    // took, so the captured sequence plays back as flawless 30fps video
+    // even though the game runs slower than wall-clock while encoding.
+    static const bool fixedStep = qEnvironmentVariableIsSet("MC_FIXEDSTEP");
+    if (fixedStep) dT = 1.f / 30.f;
 
     // Update time for animation
     m_currentTime += dT;
+    m_lastDt = dT;
 
     // Update sky time
     m_sky.updateTime(dT);
@@ -157,17 +295,118 @@ void MyGL::tick() {
     // Update weather system
     m_weather.update(dT, m_player.mcr_position, &m_terrain);
 
-    // Check if we need to create new chunks
-    m_terrain.checkAndCreateNewChunks(m_player.mcr_position);
+    // Expand the world around the player and move generated chunks through
+    // the multithreaded meshing pipeline
+    m_terrain.updateTerrain(m_player.mcr_position);
 
-    // Process multithreaded chunk work
-    m_terrain.consumeChunkWork();
+    // Advance any in-progress fluid flow
+    m_terrain.processFluids();
 
-    // Pass dT to player's tick function
-    m_player.tick(dT, m_inputs);
+#ifdef Q_OS_MACOS
+    // Camera look from raw mouse deltas while captured - smooth and
+    // frame-rate independent, exactly like a native FPS
+    if (m_mouseCaptured && isActiveWindow()) {
+        int32_t mdx, mdy;
+        CGGetLastMouseDelta(&mdx, &mdy);
+        const float sensitivity = 0.10f;
+        if (mdx != 0) m_player.rotateOnUpGlobal(-mdx * sensitivity);
+        if (mdy != 0) m_player.rotateOnRightLocal(-mdy * sensitivity);
+    }
+#endif
+
+    // MC_PILOT: scripted self-test drives the inputs instead of the user
+    if (qEnvironmentVariableIsSet("MC_PILOT")) {
+        runPilot();
+    } else if (qEnvironmentVariableIsSet("MC_DEMO") ||
+               qEnvironmentVariableIsSet("MC_SHOTS")) {
+        runDemo(dT);
+    }
+    // MC_RECORD=<dir>: dump every rendered frame as a JPEG for the demo
+    // video. Encoding runs on worker threads; frames drop rather than
+    // stall the game when the writers fall behind.
+    recordFrame();
+    // MC_SHOTS=<dir>: grab full-resolution stills at curated demo moments.
+    captureShots();
+
+    // Pass dT to player's tick function - held until the spawn chunk has
+    // block data so the player lands on ground instead of falling through
+    // a world that hasn't streamed in yet
+    int ppx = static_cast<int>(glm::floor(m_player.mcr_position.x));
+    int ppz = static_cast<int>(glm::floor(m_player.mcr_position.z));
+    if (m_terrain.hasChunkAt(ppx, ppz) &&
+        m_terrain.getChunkAt(ppx, ppz)->m_blocksFilled.load()) {
+        m_player.tick(dT, m_inputs);
+    }
+
+    // Wander the sheep
+    for (auto &sheep : m_terrain.m_sheep) {
+        sheep->tick(dT, m_inputs);
+    }
+
+    // Third-person animation state: horizontal speed and arm-swing decay
+    glm::vec2 dxz(m_player.mcr_position.x - m_prevPlayerPos.x,
+                  m_player.mcr_position.z - m_prevPlayerPos.z);
+    m_playerSpeed = dT > 0.f ? glm::length(dxz) / dT : 0.f;
+    m_prevPlayerPos = m_player.mcr_position;
+    m_armSwing = glm::max(0.f, m_armSwing - dT);
 
     update(); // Calls paintGL() as part of a larger QOpenGLWidget pipeline
     sendPlayerDataToGUI(); // Updates the info in the secondary window displaying player data
+
+    // Average frame time, logged every 5 seconds while MC_AUTOSHOT is set
+    if (qEnvironmentVariableIsSet("MC_AUTOSHOT")) {
+        static float fpsAccum = 0.f;
+        static int fpsFrames = 0;
+        fpsAccum += dT;
+        fpsFrames++;
+        if (fpsAccum > 5.f) {
+            qDebug() << "avg frame ms:" << (fpsAccum / fpsFrames) * 1000.f;
+            fpsAccum = 0.f;
+            fpsFrames = 0;
+        }
+    }
+
+    // With MC_AUTOSHOT set, save a frame grab every few seconds (used to
+    // verify rendering headlessly; grabFramebuffer works even unfocused)
+    if (qEnvironmentVariableIsSet("MC_AUTOSHOT")) {
+        static float shotTimer = 0.f;
+        static int shotIndex = 0;
+        shotTimer += dT;
+        if (shotTimer > 5.f) {
+            shotTimer = 0.f;
+            grabFramebuffer().save(QString("/tmp/mc_frame_%1.png").arg(shotIndex++ % 4));
+        }
+    }
+}
+
+int MyGL::invCount(BlockType t) const {
+    if (t == WATER) return -1; // infinite
+    auto it = m_inventory.find(Crafting::invItemFor(t));
+    return it == m_inventory.end() ? 0 : it->second;
+}
+
+void MyGL::invAdd(BlockType t, int n) {
+    if (t == WATER || t == LAVA) return;
+    m_inventory[Crafting::invItemFor(t)] += n;
+    m_hudDirty = m_craftDirty = true;
+}
+
+bool MyGL::invTake(BlockType t, int n) {
+    if (t == WATER) return true;
+    int &have = m_inventory[Crafting::invItemFor(t)];
+    if (have < n) return false;
+    have -= n;
+    m_hudDirty = m_craftDirty = true;
+    return true;
+}
+
+void MyGL::craftSelected() {
+    const CraftRecipe &r = Crafting::RECIPES[m_craftSel];
+    if (invCount(r.in1) < r.n1) return;
+    if (r.in2 != EMPTY && invCount(r.in2) < r.n2) return;
+    invTake(r.in1, r.n1);
+    if (r.in2 != EMPTY) invTake(r.in2, r.n2);
+    invAdd(r.out, r.nOut);
 }
 
 void MyGL::sendPlayerDataToGUI() const {
@@ -182,332 +421,185 @@ void MyGL::sendPlayerDataToGUI() const {
     emit sig_sendPlayerTerrainZone(QString::fromStdString("( " + std::to_string(zone.x) + ", " + std::to_string(zone.y) + " )"));
 }
 
-
-
-// Update the paintGL method in mygl.cpp to render weather effects
+std::array<glm::vec4, 6> MyGL::computeFrustumPlanes(const glm::mat4 &vp) {
+    // glm matrices are column-major: row(i)[j] == vp[j][i]
+    auto row = [&vp](int i) {
+        return glm::vec4(vp[0][i], vp[1][i], vp[2][i], vp[3][i]);
+    };
+    glm::vec4 r0 = row(0), r1 = row(1), r2 = row(2), r3 = row(3);
+    return { r3 + r0,   // left
+             r3 - r0,   // right
+             r3 + r1,   // bottom
+             r3 - r1,   // top
+             r3 + r2,   // near
+             r3 - r2 }; // far
+}
 
 void MyGL::paintGL() {
-    // Clear the screen so that we only see newly drawn images
+    // ---- Pass 0: render scene depth from the sun for shadow mapping ----
+    glm::vec3 sunDir = m_sky.getSunDirection();
+    bool shadowsOn = sunDir.y > 0.06f;
+    glm::mat4 lightVP(1.f);
+    if (shadowsOn) {
+        glm::vec3 center = m_player.mcr_position;
+        glm::mat4 lightView = glm::lookAt(center + glm::normalize(sunDir) * 170.f,
+                                          center, glm::vec3(0.f, 1.f, 0.f));
+        glm::mat4 lightProj = glm::ortho(-130.f, 130.f, -130.f, 130.f, 10.f, 360.f);
+        lightVP = lightProj * lightView;
+        m_shadowMap.bindFrameBuffer();
+        glViewport(0, 0, m_shadowMap.size(), m_shadowMap.size());
+        glClear(GL_DEPTH_BUFFER_BIT);
+        m_progShadow.setUnifMat4("u_ViewProj", lightVP);
+        glm::vec2 sp(m_player.mcr_position.x, m_player.mcr_position.z);
+        glm::ivec2 sc = 16 * glm::ivec2(glm::floor(sp / 16.f));
+        m_terrain.drawOpaque(sc.x - SHADOW_RADIUS, sc.x + SHADOW_RADIUS + 16,
+                             sc.y - SHADOW_RADIUS, sc.y + SHADOW_RADIUS + 16,
+                             &m_progShadow, nullptr);
+
+    }
+
+    // Active viewpoint: first-person head, or third-person pulled back
+    // along the look direction (stopping short of solid terrain)
+    m_activeCamEye = m_player.mcr_camera.mcr_position;
+    if (m_thirdPerson) {
+        // Pull back along the look ray from a slightly raised anchor,
+        // stopping with a safety margin before any solid block so the
+        // camera never clips inside terrain at the frame edges
+        glm::vec3 f = m_player.mcr_camera.forward();
+        glm::vec3 anchor = m_player.mcr_camera.mcr_position + glm::vec3(0.f, 0.35f, 0.f);
+        auto solidNear = [this](glm::vec3 q) {
+            for (float ox : {-0.22f, 0.22f}) {
+                for (float oy : {-0.1f, 0.3f}) {
+                    glm::vec3 s = q + glm::vec3(ox, oy, ox * 0.5f);
+                    if (!m_terrain.hasChunkAt(glm::floor(s.x), glm::floor(s.z))) continue;
+                    BlockType b = m_terrain.getGlobalBlockAt(glm::floor(s.x), glm::floor(s.y), glm::floor(s.z));
+                    if (b != EMPTY && b != WATER && b != LAVA) return true;
+                }
+            }
+            return false;
+        };
+        float dist = 0.8f;
+        for (float d = 0.8f; d <= 4.6f; d += 0.15f) {
+            if (solidNear(anchor - f * d)) break;
+            dist = d;
+        }
+        // Ease outward so the camera never pops when the pull-back ray
+        // crosses block corners, but snap inward instantly: a lagging eye
+        // that drifts into a block for a few frames reads as a black flash
+        // (especially while jumping or pillaring up).
+        if (dist < m_tpDistance) m_tpDistance = dist;
+        else m_tpDistance += (dist - m_tpDistance) * glm::min(1.f, 10.f * m_lastDt);
+        m_activeCamEye = anchor - f * m_tpDistance;
+        m_activeViewProj = m_player.mcr_camera.getViewProjFrom(m_activeCamEye);
+    } else {
+        m_activeViewProj = m_player.mcr_camera.getViewProj();
+    }
+
+    // ---- Pass 1: render the 3D scene into the offscreen frame buffer ----
+    m_frameBuffer.bindFrameBuffer();
+    glViewport(0, 0, width() * devicePixelRatio(), height() * devicePixelRatio());
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-    // First render the sky (background)
+    // Sky first (background)
     renderSky();
 
     // Set projection matrices for 3D rendering
-    glm::mat4 viewproj = m_player.mcr_camera.getViewProj();
+    glm::mat4 viewproj = m_activeViewProj;
     m_progLambert.setUnifMat4("u_ViewProj", viewproj);
     m_progFlat.setUnifMat4("u_ViewProj", viewproj);
-    m_progInstanced.setUnifMat4("u_ViewProj", viewproj);
+
+    // Shadow-map uniforms for the terrain shader
+    m_progLambert.setUnifMat4("u_ShadowVP", lightVP);
+    m_progLambert.setUnifInt("u_ShadowsOn", shadowsOn ? 1 : 0);
+    m_shadowMap.bindToTextureSlot(3);
+    m_progLambert.setUnifInt("u_ShadowMap", 3);
 
     // Update lighting parameters based on sky and weather
     m_progLambert.setUnifVec3("u_LightDir", m_sky.getSunDirection());
     m_progLambert.setUnifVec3("u_LightColor", m_sky.getLightColor());
     m_progLambert.setUnifFloat("u_LightIntensity", m_sky.getLightIntensity());
 
+    // Distance fog fades terrain into the sky's horizon color
+    glm::vec3 fogColor = m_sky.m_currentSkyHorizon * m_weather.getWeatherSkyFactor();
+    m_progLambert.setUnifVec3("u_FogColor", fogColor);
+    m_progLambert.setUnifFloat("u_FogDistance", std::min(m_weather.getWeatherFogDistance(), FOG_END));
+    m_progLambert.setUnifVec3("u_CamPos", m_activeCamEye);
 
     // Bind texture and set uniforms for the shader
     texture->bind(0);
     m_progLambert.setUnifInt("u_Texture", 0);
     m_progLambert.setUnifFloat("u_Time", m_currentTime);
 
-    // Render the terrain
     renderTerrain();
 
-    for (const auto& sheep : m_terrain.m_sheep) {
-        glm::vec3 basePos = sheep->getPosition() + glm::vec3(0.f, 0.05f, 0.f);
-        glm::vec3 forward = sheep->getForward();
-
-        float sheepScale = 0.5f; // Shrink everything by half
-
-        // ----- Calculate rotation from forward -----
-        float angle = glm::degrees(atan2(forward.z, forward.x)); // Heading angle
-
-        // Body
-        glm::mat4 model = glm::mat4(1.f);
-        model = glm::translate(model, basePos);
-        model = glm::rotate(model, glm::radians(angle), glm::vec3(0,1,0));
-        model = glm::scale(model, glm::vec3(sheepScale) * glm::vec3(1.4f, 0.8f, 0.9f));
-        m_progFlat.setUnifMat4("u_Model", model);
-        m_progFlat.draw(m_sheepCube);
-
-        // Head
-        glm::mat4 headModel = glm::mat4(1.f);
-        headModel = glm::translate(headModel, basePos + glm::mat3(glm::rotate(glm::mat4(1.f), glm::radians(angle), glm::vec3(0,1,0))) * glm::vec3(0.8f, 0.2f, 0.f) * sheepScale);
-        headModel = glm::rotate(headModel, glm::radians(angle), glm::vec3(0,1,0));
-        headModel = glm::scale(headModel, glm::vec3(sheepScale) * glm::vec3(0.5f, 0.5f, 0.5f));
-        m_progFlat.setUnifMat4("u_Model", headModel);
-        m_progFlat.draw(m_sheepCube);
-
-        // Legs
-        glm::vec3 legOffsets[] = {
-            glm::vec3( 0.5f, -0.6f,  0.3f),
-            glm::vec3(-0.5f, -0.6f,  0.3f),
-            glm::vec3( 0.5f, -0.6f, -0.3f),
-            glm::vec3(-0.5f, -0.6f, -0.3f),
-        };
-
-        for (glm::vec3 offset : legOffsets) {
-            glm::mat4 legModel = glm::mat4(1.f);
-            legModel = glm::translate(legModel, basePos + glm::mat3(glm::rotate(glm::mat4(1.f), glm::radians(angle), glm::vec3(0,1,0))) * offset * sheepScale);
-            legModel = glm::rotate(legModel, glm::radians(angle), glm::vec3(0,1,0));
-            legModel = glm::scale(legModel, glm::vec3(sheepScale) * glm::vec3(0.15f, 0.5f, 0.15f));
-            m_progFlat.setUnifMat4("u_Model", legModel);
-            m_progFlat.draw(m_sheepCube);
-        }
+    // Outline the block the crosshair is aiming at
+    glm::ivec3 target;
+    if (m_player.raycastBlock(m_terrain, target)) {
+        m_progFlat.setUnifMat4("u_Model", glm::translate(glm::mat4(1.f), glm::vec3(target)));
+        m_progFlat.setUnifVec4("u_Tint", glm::vec4(1.f));
+        m_progFlat.draw(m_blockHighlight);
     }
 
-
-    // Render weather effects (particles)
+    renderSheep();
+    if (m_thirdPerson &&
+        glm::distance(m_activeCamEye, m_player.mcr_camera.mcr_position) > 1.4f) {
+        renderPlayerModel();
+    }
     renderWeather();
 
-    // Render the world axes
+    // ---- Pass 2: post-process the scene texture onto the screen ----
+    glBindFramebuffer(GL_FRAMEBUFFER, defaultFramebufferObject());
+    glViewport(0, 0, width() * devicePixelRatio(), height() * devicePixelRatio());
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
     glDisable(GL_DEPTH_TEST);
-    m_progFlat.setUnifMat4("u_Model", glm::mat4());
-    m_progFlat.draw(m_worldAxes);
+
+    // Blue overlay underwater, red in lava, near-black while the camera
+    // is inside a solid block (flying through terrain), like Minecraft
+    int inWater = 0, inLava = 0, inSolid = 0;
+    glm::vec3 camPos = m_activeCamEye;
+    if (m_terrain.hasChunkAt(glm::floor(camPos.x), glm::floor(camPos.z))) {
+        BlockType camBlock = m_terrain.getGlobalBlockAt(glm::floor(camPos.x),
+                                                        glm::floor(camPos.y),
+                                                        glm::floor(camPos.z));
+        inWater = (camBlock == WATER) ? 1 : 0;
+        inLava = (camBlock == LAVA) ? 1 : 0;
+        // The buried-camera blackout is for first-person noclip flight. In
+        // third person the pull-back collision already keeps the camera out
+        // of terrain, so suppressing it here avoids a black flash when a
+        // rising jump momentarily tucks the eye behind a ledge.
+        inSolid = (!m_thirdPerson && camBlock != EMPTY &&
+                   camBlock != WATER && camBlock != LAVA) ? 1 : 0;
+    }
+    // Fade the buried-camera blackout in and out - a single-frame flash
+    // when the camera clips a ceiling reads as a glitch otherwise
+    m_solidFade += ((inSolid ? 1.f : 0.f) - m_solidFade) * glm::min(1.f, 14.f * m_lastDt);
+
+    m_frameBuffer.bindToTextureSlot(1);
+    m_progPost.setUnifInt("u_Texture", 1);
+    m_progPost.setUnifInt("u_InWater", inWater);
+    m_progPost.setUnifInt("u_InLava", inLava);
+    m_progPost.setUnifFloat("u_InSolid", m_solidFade);
+    WeatherType wk = m_weather.getCurrentWeather();
+    m_progPost.setUnifInt("u_WeatherKind", wk == RAIN ? 1 : (wk == SNOWY ? 2 : 0));
+    m_progPost.setUnifFloat("u_WeatherStrength", m_weather.getWeatherIntensity());
+    // Hide the crosshair in third person: the camera sits behind the
+    // player, so a centered crosshair lands on the character's body instead
+    // of marking where they aim (Minecraft hides it in third person too).
+    bool showCrosshair = m_hudVisible && !m_thirdPerson &&
+                         (m_mouseCaptured || qEnvironmentVariableIsSet("MC_PILOT") ||
+                          qEnvironmentVariableIsSet("MC_DEMO"));
+    m_progPost.setUnifInt("u_Crosshair", showCrosshair ? 1 : 0);
+    m_progPost.setUnifFloat("u_Time", m_currentTime);
+    m_progPost.draw(m_quad);
+
+    // Debug world-axes overlay (toggled with O)
+    if (m_showAxes) {
+        m_progFlat.setUnifMat4("u_Model", glm::mat4());
+        m_progFlat.setUnifVec4("u_Tint", glm::vec4(1.f));
+        m_progFlat.draw(m_worldAxes);
+    }
+
+    if (m_hudVisible) renderHud();
     glEnable(GL_DEPTH_TEST);
 }
 
-
-void MyGL::renderSky() {
-    // Disable depth testing for sky rendering (always behind everything)
-    glDepthMask(GL_FALSE);
-    glDisable(GL_DEPTH_TEST);
-
-    // Set up sky shader uniforms
-    m_progSky.useMe();
-
-    // Set inverse view projection matrix
-    glm::mat4 viewproj = m_player.mcr_camera.getViewProj();
-    glm::mat4 invViewProj = glm::inverse(viewproj);
-    m_progSky.setInvViewProj(invViewProj);
-
-    // Get weather information
-    WeatherType currentWeather = m_weather.getCurrentWeather();
-    float weatherIntensity = m_weather.getWeatherIntensity();
-    glm::vec3 weatherSkyFactor = m_weather.getWeatherSkyFactor();
-    float fogDistance = m_weather.getWeatherFogDistance();
-
-    // Apply weather effects to sky colors
-    glm::vec3 modifiedZenith = m_sky.m_currentSkyZenith * weatherSkyFactor;
-    glm::vec3 modifiedHorizon = m_sky.m_currentSkyHorizon * weatherSkyFactor;
-    glm::vec3 modifiedSunColor = m_sky.m_currentSunColor * weatherSkyFactor;
-
-    // Set sky colors based on current time, modified by weather
-    m_progSky.setSunDirection(m_sky.getSunDirection());
-    m_progSky.setSkyZenithColor(modifiedZenith);
-    m_progSky.setSkyHorizonColor(modifiedHorizon);
-    m_progSky.setSunColor(modifiedSunColor);
-
-    // Set weather-related uniforms
-    m_progSky.setFogDistance(fogDistance);
-    m_progSky.setWeatherType(static_cast<int>(currentWeather));
-    m_progSky.setWeatherIntensity(weatherIntensity);
-    m_progSky.setTime(m_currentTime);
-
-    // Draw sky quad
-    m_progSky.draw(m_sky);
-
-    // Re-enable depth testing for terrain rendering
-    glDepthMask(GL_TRUE);
-    glEnable(GL_DEPTH_TEST);
-}
-
-
-// void MyGL::renderWeather() {
-//     // Skip rendering if weather is clear or intensity is too low
-//     if (m_weather.getCurrentWeather() == CLEAR || m_weather.getWeatherIntensity() < 0.1f) {
-//         return;
-//     }
-
-//     // Get view projection matrix and camera position
-//     glm::mat4 viewproj = m_player.mcr_camera.getViewProj();
-//     glm::vec3 cameraPos = m_player.mcr_camera.mcr_position;
-
-//     // Calculate simple wind direction based on time
-//     glm::vec3 windDir = glm::vec3(
-//         sin(m_currentTime * 0.1f),
-//         -1.0f, // Wind always blows slightly downward for precipitation
-//         cos(m_currentTime * 0.1f)
-//         );
-//     windDir = glm::normalize(windDir);
-
-//     // Wind strength varies by weather type
-//     float windStrength = 0.0f;
-//     if (m_weather.getCurrentWeather() == RAIN) {
-//         windStrength = 1.0f + sin(m_currentTime * 0.3f) * 0.5f;
-//     } else { // SNOW
-//         windStrength = 0.3f + sin(m_currentTime * 0.2f) * 0.2f;
-//     }
-
-//     // Set up weather shader
-//     m_progWeather.useMe();
-//     m_progWeather.setWindDirection(windDir);
-//     m_progWeather.setWindStrength(windStrength);
-//     m_progWeather.setTime(m_currentTime);
-
-//     // Draw weather particles
-//     m_weather.drawParticles(&m_progWeather, viewproj, cameraPos);
-// }
-
-void MyGL::renderWeather() {
-    // Skip rendering if weather is clear or intensity is too low
-    if (m_weather.getCurrentWeather() == CLEAR || m_weather.getWeatherIntensity() < 0.1f) {
-        return;
-    }
-
-    // Get view projection matrix and camera position
-    glm::mat4 viewproj = m_player.mcr_camera.getViewProj();
-    glm::vec3 cameraPos = m_player.mcr_camera.mcr_position;
-
-    // Calculate simple wind direction based on time
-    glm::vec3 windDir = glm::vec3(
-        sin(m_currentTime * 0.1f),
-        -1.0f, // Wind always blows slightly downward for precipitation
-        cos(m_currentTime * 0.1f)
-        );
-    windDir = glm::normalize(windDir);
-
-    // Wind strength varies by weather type
-    float windStrength = 0.0f;
-    if (m_weather.getCurrentWeather() == RAIN) {
-        windStrength = 1.0f + sin(m_currentTime * 0.3f) * 0.5f;
-    } else { // SNOW
-        windStrength = 0.3f + sin(m_currentTime * 0.2f) * 0.2f;
-    }
-
-    // Set up weather shader
-    m_progWeather.useMe();
-    m_progWeather.setWindDirection(windDir);
-    m_progWeather.setWindStrength(windStrength);
-    m_progWeather.setTime(m_currentTime);
-    m_progWeather.setCameraPos(cameraPos);
-
-    // Enable blending for particles
-    glEnable(GL_BLEND);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-
-    // Disable depth writing (but keep depth testing)
-    glDepthMask(GL_FALSE);
-
-    // Draw weather particles
-    m_weather.drawParticles(&m_progWeather, viewproj, cameraPos);
-
-    // Restore state
-    glDepthMask(GL_TRUE);
-}
-
-
-// Updated to render the nine zones of generated terrain
-// that surround the player, with separate passes for opaque and transparent blocks
-void MyGL::renderTerrain() {
-    glm::vec2 p(m_player.mcr_position.x, m_player.mcr_position.z);
-    glm::ivec2 zone = 64 * glm::ivec2(glm::floor(p/64.f));
-
-    // OPAQUE PASS
-    m_terrain.drawOpaque(zone.x-64, zone.x+64+16,
-                         zone.y-64, zone.y+64+16,
-                         &m_progLambert);
-
-    // TRANSPARENT PASS
-    glEnable(GL_BLEND);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    m_terrain.drawTransparent(zone.x-64, zone.x+64+16,
-                              zone.y-64, zone.y+64+16,
-                              &m_progLambert);
-}
-
-void MyGL::keyPressEvent(QKeyEvent *e) {
-    float amount = 2.0f;
-    if(e->modifiers() & Qt::ShiftModifier){
-        amount = 10.0f;
-    }
-    if (e->key() == Qt::Key_Escape) {
-        QApplication::quit();
-    } else if (e->key() == Qt::Key_Right) {
-        m_player.rotateOnUpGlobal(-amount);
-    } else if (e->key() == Qt::Key_Left) {
-        m_player.rotateOnUpGlobal(amount);
-    } else if (e->key() == Qt::Key_Up) {
-        m_player.rotateOnRightLocal(-amount);
-    } else if (e->key() == Qt::Key_Down) {
-        m_player.rotateOnRightLocal(amount);
-    } else if (e->key() == Qt::Key_W) {
-        m_inputs.wPressed = true;
-    } else if (e->key() == Qt::Key_S) {
-        m_inputs.sPressed = true;
-    } else if (e->key() == Qt::Key_D) {
-        m_inputs.dPressed = true;
-    } else if (e->key() == Qt::Key_A) {
-        m_inputs.aPressed = true;
-    } else if (e->key() == Qt::Key_Q) {
-        m_inputs.qPressed = true;
-    } else if (e->key() == Qt::Key_E) {
-        m_inputs.ePressed = true;
-    } else if (e->key() == Qt::Key_F) {
-        m_inputs.fPressed = true;
-    } else if (e->key() == Qt::Key_Space) {
-        m_inputs.spacePressed = true;
-    } else if (e->key() == Qt::Key_R){
-        m_inputs.rPressed = true;
-    } else if (e->key() == Qt::Key_T) {
-        // Set time to morning when T is pressed
-        m_sky.setTimeOfDay(6.0f);
-    } else if (e->key() == Qt::Key_Y) {
-        // Set time to noon when Y is pressed
-        m_sky.setTimeOfDay(12.0f);
-    } else if (e->key() == Qt::Key_U) {
-        // Set time to sunset when U is pressed
-        m_sky.setTimeOfDay(18.0f);
-    } else if (e->key() == Qt::Key_I) {
-        // Set time to midnight when I is pressed
-        m_sky.setTimeOfDay(0.0f);
-    } else if (e->key() == Qt::Key_1) {
-        // Set weather to clear when 1 is pressed
-        m_weather.setWeather(CLEAR);
-    } else if (e->key() == Qt::Key_2) {
-        // Set weather to rain when 2 is pressed
-        m_weather.setWeather(RAIN);
-    } else if (e->key() == Qt::Key_3) {
-        // Set weather to snow when 3 is pressed
-        m_weather.setWeather(SNOWY);
-    }
-}
-
-void MyGL::keyReleaseEvent(QKeyEvent *e) {
-    switch(e->key()) {
-    case Qt::Key_W: m_inputs.wPressed = false; break;
-    case Qt::Key_S: m_inputs.sPressed = false; break;
-    case Qt::Key_D: m_inputs.dPressed = false; break;
-    case Qt::Key_A: m_inputs.aPressed = false; break;
-    case Qt::Key_Space: m_inputs.spacePressed = false; break;
-    case Qt::Key_E: m_inputs.ePressed = false; break;
-    case Qt::Key_Q: m_inputs.qPressed = false; break;
-    case Qt::Key_F: m_inputs.fPressed = false; break;
-    case Qt::Key_R: m_inputs.rPressed = false; break;
-    }
-}
-
-void MyGL::mouseMoveEvent(QMouseEvent *e) {
-    QPoint center(width() / 2, height() / 2);
-    QPoint delta = e->pos() - center;
-    float sensitivity = 0.005f; // Reduced sensitivity for smoother camera movement
-    m_player.rotateOnUpGlobal(-delta.x() * sensitivity);
-    m_player.rotateOnRightLocal(-delta.y() * sensitivity);
-    moveMouseToCenter();
-}
-
-void MyGL::mousePressEvent(QMouseEvent *e) {
-    if (e->button() == Qt::RightButton) {
-        m_player.removeAddBlock(true, false, m_terrain, m_player.shootingRange);
-    } else if (e->button() == Qt::LeftButton) {
-        m_inputs.leftpressed = true;
-        m_player.removeAddBlock(false, true, m_terrain, m_player.shootingRange);
-    }
-    update();
-}
-
-void MyGL::mouseReleaseEvent(QMouseEvent *e) {
-    if (e->button() == Qt::LeftButton) {
-        m_inputs.leftpressed = false;
-    }
-}

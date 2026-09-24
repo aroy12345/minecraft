@@ -50,28 +50,11 @@ void WeatherSystem::initialize() {
 }
 
 void WeatherSystem::update(float deltaTime, const glm::vec3& playerPos, const Terrain* terrain) {
-    // Update weather change timer
     m_currentTime += deltaTime;
-    m_weatherChangeTimer -= deltaTime;
 
-    // Randomly change weather if timer expires
-    if (m_weatherChangeTimer <= 0.0f) {
-        float rand = m_dist(m_rng);
-
-        if (rand < 0.6f) {
-            // 60% chance of clear weather
-            setWeather(CLEAR);
-        } else if (rand < 0.8f) {
-            // 20% chance of rain
-            setWeather(RAIN);
-        } else {
-            // 20% chance of snow
-            setWeather(SNOWY);
-        }
-
-        // Set new timer (between 30-120 seconds)
-        m_weatherChangeTimer = 30.0f + m_dist(m_rng) * 90.0f;
-    }
+    // Weather never changes on its own - the sky stays clear until the
+    // player asks for rain or snow with the Z / X / C keys. (Random weather
+    // used to sprinkle unexpected rain/snow particles into calm play.)
 
     // Generate particles if we have weather
     if (m_currentWeather != CLEAR) {
