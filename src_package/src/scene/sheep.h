@@ -2,41 +2,22 @@
 #pragma once
 #include "entity.h"
 #include <QSoundEffect>
-#include <QThread>
-#include <QWaitCondition>
-#include <atomic>
 class Terrain;
-
-// Audio thread class to handle sound operations off the main thread
-class AudioThread : public QThread {
-public:
-    AudioThread();
-    ~AudioThread();
-
-    void run() override;
-    void requestPlay();
-
-private:
-    QSoundEffect* m_sound;
-    bool m_running;
-    QWaitCondition m_waitCondition;
-};
 
 class Sheep : public Entity {
 public:
     Sheep(glm::vec3 pos, const Terrain& terrain);
     virtual void tick(float dT, InputBundle& input) override;
 
-    // Static methods for audio thread management
-    static void initializeAudioThread();
-    static void cleanupAudioThread();
+    // Sets up / tears down the shared bleat sound. QSoundEffect::play() is
+    // asynchronous (mixing happens on the OS audio stack), so playing it
+    // from the main thread never blocks a frame.
+    static void initializeAudio();
+    static void cleanupAudio();
 
-    // Allow AudioThread to access s_playRequested
-    friend class AudioThread;
     glm::vec3 getForward() const { return m_forward; }
-
-
-
+    // True while actually strolling (not pausing or turning in place)
+    bool isWalking() const { return !m_pausing && !m_turning; }
 
 private:
     // Terrain reference
@@ -48,7 +29,6 @@ private:
     bool m_onground;
     float m_moveSpeed;
     float m_bodyWidth;
-    float m_bodyDepth;
 
     // Movement behavior
     float m_timeSinceLastTurn;
@@ -60,13 +40,10 @@ private:
     float m_pauseTime;
     float m_pauseDuration;
 
-    // Audio system (thread-safe)
+    // Shared bleat sound, played on a random cooldown by the first sheep
     static QSoundEffect* s_baahSound;
     static float s_timeSinceLastBaah;
     static float s_baahCooldown;
-    static bool s_soundInitialized;
-    static std::atomic<bool> s_playRequested;
-    static AudioThread* s_audioThread;
 
     // Helper methods
     void chooseNewAction();
