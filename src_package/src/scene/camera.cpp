@@ -28,13 +28,18 @@ void Camera::setWidthHeight(unsigned int w, unsigned int h) {
 }
 
 
-void Camera::tick(float dT, InputBundle &input) {
+void Camera::tick(float, InputBundle &) {
     // Do nothing
 }
 
 glm::mat4 Camera::getViewProj() const {
     return glm::perspective(glm::radians(m_fovy), m_aspect, m_near_clip, m_far_clip) * glm::lookAt(m_position, m_position + m_forward, m_up);
 
+}
+
+glm::mat4 Camera::getViewProjFrom(const glm::vec3 &eye) const {
+    return glm::perspective(glm::radians(m_fovy), m_aspect, m_near_clip, m_far_clip)
+         * glm::lookAt(eye, eye + m_forward, m_up);
 }
 
 void Camera::updatePos(glm::vec3 positon) {
