@@ -38,3 +38,23 @@ public:
     void bindToTextureSlot(unsigned int slot);
     unsigned int getTextureSlot() const;
 };
+
+// A depth-only frame buffer used for shadow mapping: the scene is rendered
+// from the sun into its depth texture, which the lambert shader samples to
+// decide whether each fragment is lit or shadowed.
+class DepthFrameBuffer {
+private:
+    OpenGLContext *mp_context;
+    GLuint m_frameBuffer;
+    GLuint m_depthTexture;
+    unsigned int m_size;
+    bool m_created;
+
+public:
+    DepthFrameBuffer(OpenGLContext *context, unsigned int size);
+    void create();
+    void destroy();
+    void bindFrameBuffer();
+    void bindToTextureSlot(unsigned int slot);
+    unsigned int size() const { return m_size; }
+};

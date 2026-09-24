@@ -3,13 +3,10 @@
 #include <glm_includes.h>
 #include <unordered_map>
 
-#define dict std::unordered_map
 
 enum BufferType : unsigned char {
     INDEX,
     POSITION, NORMAL, COLOR, UV,
-    INTERLEAVED,
-    INSTANCED_OFFSET,
     OPAQUE_INTERLEAVED, TRANSPARENT_INTERLEAVED,
     OPAQUE_INDEX, TRANSPARENT_INDEX
 };
@@ -21,12 +18,12 @@ enum BufferType : unsigned char {
 class Drawable
 {
 protected:
-    dict<BufferType, GLuint> bufHandles;
-    dict<BufferType, bool> bufGenerated;
+    std::unordered_map<BufferType, GLuint> bufHandles;
+    std::unordered_map<BufferType, bool> bufGenerated;
     // The length of the index buffer indicated by the key.
     // Unless you have more than one index buffer, this map
     // will have just one key-value pair.
-    dict<BufferType, int> indexCounts;
+    std::unordered_map<BufferType, int> indexCounts;
 
     OpenGLContext* mp_context; // Since Qt's OpenGL support is done through classes like QOpenGLFunctions_3_2_Core,
                                // we need to pass our OpenGL context to the Drawable in order to call GL functions
@@ -49,29 +46,3 @@ public:
 
     bool bindBuffer(BufferType buf);
 };
-
-
-// A subclass of Drawable that enables the base code to render duplicates of
-// the Terrain class's Cube member variable via OpenGL's instanced rendering.
-// You will not have need for this class when completing the base requirements
-// for Mini Minecraft, but you might consider using instanced rendering for
-// some of the milestone 3 ideas.
-class InstancedDrawable : public Drawable {
-protected:
-    int m_numInstances;
-
-public:
-    InstancedDrawable(OpenGLContext* mp_context);
-    virtual ~InstancedDrawable();
-    int instanceCount() const;
-
-    void generateOffsetBuf();
-    bool bindOffsetBuf();
-    void clearOffsetBuf();
-    void clearColorBuf();
-
-    virtual void createInstancedVBOdata(std::vector<glm::vec3> &offsets, std::vector<glm::vec3> &colors) = 0;
-};
-
-
-// An enum containing all of the types of VBO data that can be stored on the GPU

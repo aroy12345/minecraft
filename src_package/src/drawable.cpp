@@ -53,26 +53,3 @@ bool Drawable::bindBuffer(BufferType buf) {
     return bufGenerated[buf];
 }
 
-InstancedDrawable::InstancedDrawable(OpenGLContext *context)
-    : Drawable(context), m_numInstances(0)
-{}
-
-InstancedDrawable::~InstancedDrawable(){}
-
-int InstancedDrawable::instanceCount() const {
-    return m_numInstances;
-}
-
-void InstancedDrawable::clearOffsetBuf() {
-    if(bufGenerated[INSTANCED_OFFSET]) {
-        mp_context->glDeleteBuffers(1, &bufHandles[INSTANCED_OFFSET]);
-        bufGenerated[INSTANCED_OFFSET] = false;
-    }
-}
-void InstancedDrawable::clearColorBuf() {
-    if(bufGenerated[COLOR]) {
-        mp_context->glDeleteBuffers(1, &bufHandles[COLOR]);
-        bufGenerated[COLOR] = false;
-    }
-}
-

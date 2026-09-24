@@ -5,8 +5,8 @@
 
 SkyRenderer::SkyRenderer(OpenGLContext* context)
     : Drawable(context), mp_context(context),
-    m_timeOfDay(6.0f), // Start at dawn (6 AM)
-    m_dayCycleLength(300.0f), // 5 minutes per day cycle
+    m_timeOfDay(8.0f), // Start mid-morning, fully lit
+    m_dayCycleLength(600.0f), // 10 minutes per full day/night cycle
     m_sunDirection(0.f, 1.f, 0.f) // Start with sun directly up
 {
     initializeTimeColors();
