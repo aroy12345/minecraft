@@ -1,2 +1,14 @@
-build-*
-*.pro.user
+# Qt / qmake build output
+build/
+*.o
+*.obj
+moc_*.cpp
+moc_*.h
+qrc_*.cpp
+ui_*.h
+Makefile*
+.qmake.stash
+*.pro.user*
+
+# OS cruft
+.DS_Store
