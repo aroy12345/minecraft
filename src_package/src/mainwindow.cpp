@@ -8,6 +8,12 @@ MainWindow::MainWindow(QWidget *parent) :
     ui(new Ui::MainWindow), cHelp()
 {
     ui->setupUi(this);
+    // Open at a comfortable gameplay size instead of the tiny .ui default.
+    // MC_WINSIZE=WxH overrides it (the demo recorder uses a fixed size).
+    QString ws = qEnvironmentVariable("MC_WINSIZE");
+    int wsx = ws.section('x', 0, 0).toInt(), wsy = ws.section('x', 1, 1).toInt();
+    resize(wsx > 0 ? wsx : 1440, wsy > 0 ? wsy : 900);
+    setWindowTitle("Mini Minecraft — click to play, Esc to free the mouse");
     ui->mygl->setFocus();
     this->playerInfoWindow.show();
     playerInfoWindow.move(QGuiApplication::primaryScreen()->availableGeometry().center() - this->rect().center() + QPoint(this->width() * 0.75, 0));
