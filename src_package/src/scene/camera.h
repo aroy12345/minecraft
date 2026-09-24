@@ -21,6 +21,10 @@ public:
     void tick(float dT, InputBundle &input) override;
 
     glm::mat4 getViewProj() const;
+    // View-projection from an arbitrary eye looking the way the camera
+    // faces - used by the third-person mode's pulled-back viewpoint
+    glm::mat4 getViewProjFrom(const glm::vec3 &eye) const;
+    glm::vec3 forward() const { return m_forward; }
     void updatePos(glm::vec3 position);
 
 };

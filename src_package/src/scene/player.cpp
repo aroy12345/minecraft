@@ -1,8 +1,10 @@
 #include "player.h"
-#include <Qstring>
-#include "iostream"
+#include <QString>
+#include <algorithm>
+#include <QDebug>
+
 Player::Player(glm::vec3 pos, const Terrain &terrain)
-    : Entity(pos), m_velocity(0,0,0), m_acceleration(0,0,0),
+    : Entity(pos), m_acceleration(0,0,0), m_velocity(0,0,0),
     m_camera(pos + glm::vec3(0, 1.5f, 0)), mcr_terrain(terrain),
     mcr_camera(m_camera)
 {}
@@ -11,10 +13,25 @@ Player::~Player()
 {}
 
 void Player::tick(float dT, InputBundle &input) {
+    updateLiquidState();
     processInputs(input);
     computePhysics(dT, mcr_terrain);
     m_camera.updatePos(m_position);
+}
 
+void Player::updateLiquidState() {
+    m_inLiquid = false;
+    m_inLava = false;
+    for (float dy : {0.5f, 1.5f}) { // center of the lower and upper block
+        glm::vec3 p = m_position + glm::vec3(0.f, dy, 0.f);
+        if (!mcr_terrain.hasChunkAt(glm::floor(p.x), glm::floor(p.z))) continue;
+        BlockType b = mcr_terrain.getGlobalBlockAt(glm::floor(p.x), glm::floor(p.y), glm::floor(p.z));
+        if (b == WATER || b == LAVA) {
+            m_inLiquid = true;
+            if (b == LAVA) m_inLava = true;
+            return;
+        }
+    }
 }
 
 
@@ -27,7 +44,15 @@ void Player::processInputs(InputBundle &inputs){
         if (!m_flightMode){
             m_onground = true;
             m_velocity.y = 0;
+            m_noclip = false;
         }
+    }
+
+    // Noclip toggle: collision-free flight that phases through terrain
+    if (inputs.gPressed){
+        inputs.gPressed = false;
+        m_noclip = !m_noclip;
+        if (m_noclip) m_flightMode = true; // noclip implies flying
     }
 
     //reset accel
@@ -48,21 +73,47 @@ void Player::processInputs(InputBundle &inputs){
         if (inputs.aPressed){
             m_acceleration -= m_right;
         }
+        // Vertical flight is along the world up axis regardless of look
+        // pitch, like Minecraft creative - the tilted local up would drift
+        // the player horizontally while ascending or descending
         if (inputs.ePressed){
-            m_acceleration += m_up;
+            m_acceleration += glm::vec3(0.f, 1.f, 0.f);
         }
         if (inputs.qPressed){
-            m_acceleration -= m_up;
+            m_acceleration -= glm::vec3(0.f, 1.f, 0.f);
         }
     } else{
         //ground mode
         glm::vec3 groundforward = glm::normalize(glm::vec3(m_forward.x, 0.f, m_forward.z));
         glm::vec3 groundright = glm::normalize(glm::vec3(m_right.x, 0.f, m_right.z));
 
-        const float JUMPVEL = 20.f;
+        // A higher jump than a real 1-block hop: clears roughly two blocks,
+        // so terraced ledges and shallow dug shafts can be jumped straight
+        // out of. (For a deeper shaft, jump while placing a block beneath
+        // you to pillar back up.)
+        const float JUMPVEL = 13.5f;
+        const float SWIM_UP_SPEED = 6.5f;
 
         if (inputs.wPressed){
             m_acceleration += groundforward;
+            // Swim-out lunge: stroking toward a 1-block bank while in
+            // water boosts the player up over its lip, like Minecraft's
+            // water climb - without it river banks are impossible to exit
+            if (m_inLiquid) {
+                glm::vec3 ahead = m_position + groundforward * 0.7f;
+                if (mcr_terrain.hasChunkAt(glm::floor(ahead.x), glm::floor(ahead.z))) {
+                    auto at = [this, &ahead](float dy) {
+                        return mcr_terrain.getGlobalBlockAt(
+                            glm::floor(ahead.x), glm::floor(ahead.y + dy), glm::floor(ahead.z));
+                    };
+                    BlockType lip = at(0.f), above1 = at(1.f), above2 = at(2.f);
+                    bool lipSolid = lip != EMPTY && lip != WATER && lip != LAVA;
+                    bool clearAbove = (above1 == EMPTY || above1 == WATER) && above2 == EMPTY;
+                    if (lipSolid && clearAbove) {
+                        m_velocity.y = glm::max(m_velocity.y, 7.5f);
+                    }
+                }
+            }
         }
         if (inputs.sPressed){
             m_acceleration -= groundforward;
@@ -74,63 +125,119 @@ void Player::processInputs(InputBundle &inputs){
             m_acceleration -= groundright;
         }
         if(inputs.spacePressed){
-            if (m_onground==true){
+            if (m_inLiquid){
+                // Swim upward at a constant rate while Space is held
+                m_velocity.y = SWIM_UP_SPEED;
+            }
+            else if (m_onground==true){
                 m_velocity.y = JUMPVEL;
                 m_onground=false;
             }
         }
         if(inputs.rPressed){
-            shootingRange += 1.f;
+            shootingRange = std::min(shootingRange + 1.f, 10.f);
         }
     }
 
+    // Sprint while Shift is held (both movement modes)
+    if (inputs.shiftPressed) {
+        m_acceleration *= 2.f;
+    }
 }
 
 void Player::computePhysics(float dT, const Terrain &terrain) {
     const float GRAVITY = -9.8f * 4;
     const float DRAG = 0.9f;
-    const float accelAmount = 20.f;
+    // Flight is fast for covering distance; walking lands near Minecraft's
+    // pace. Steady-state speed is accel * dT / (1 - DRAG).
+    const float accelAmount = m_flightMode ? 66.f : 34.f;
+    // In water or lava, both lateral movement and gravity run at 2/3 speed
+    const float liquidScale = m_inLiquid ? (2.f / 3.f) : 1.f;
     float toMove;
 
-    m_acceleration *= accelAmount;
-    m_velocity *= DRAG;
+    m_acceleration *= accelAmount * liquidScale;
 
-    if (!m_flightMode){
-        // if ground apply gravity
-        m_velocity.y += GRAVITY * dT;
+    if (m_flightMode) {
+        // Flight (including E/Q) is acceleration + drag on every axis, which
+        // gives a smooth, capped cruising speed.
+        m_velocity *= DRAG;
+    } else {
+        // Ground: horizontal drag is friction, but the vertical axis must be
+        // pure gravity. Applying the same heavy drag to it sapped every jump
+        // to a stub - barely half a block - no matter how strong the launch.
+        m_velocity.x *= DRAG;
+        m_velocity.z *= DRAG;
+        m_velocity.y += GRAVITY * liquidScale * dT;
+        // Lava is buoyant: the player bobs at its surface and can never be
+        // pulled under, which reads far better than a red-tinted dive
+        if (m_inLava) {
+            m_velocity.y = glm::max(m_velocity.y, 4.5f);
+        }
+        // Cap fall speed so a long drop can't outrun the collision sampler
+        m_velocity.y = glm::max(m_velocity.y, -55.f);
     }
 
     m_velocity += m_acceleration * dT;
     glm::vec3 displacement = m_velocity*dT;
 
-    if(m_flightMode){
-        // moveForwardGlobal(displacement.z);
-        // moveRightGlobal(displacement.x);
-        // moveUpGlobal(displacement.y);
-
-        // moveForwardLocal(displacement.z);
-        // moveRightLocal(displacement.x);
-        // moveUpGlobal(displacement.y);
+    if(m_flightMode && m_noclip){
+        // Spectator-style flight: no terrain collisions at all
         m_position += displacement;
     }
 
 
     else{
-        //player + camera totally is considered to be 2 minecraft blocks stacked on top of each other
-        //cross checking against 3 layers of the 2 blocks
+        // Normal flight and walking both collide with the world, like
+        // Minecraft creative - the only ways underground are digging or
+        // walking into a cave.
+        // If the player is embedded in solid terrain (e.g. leaving noclip
+        // inside a hill), pop up to the surface like Minecraft
+        // does instead of leaving them wedged and unable to move
+        auto solidAt = [&terrain](glm::vec3 q) -> bool {
+            if (!terrain.hasChunkAt(glm::floor(q.x), glm::floor(q.z))) return false;
+            BlockType b = terrain.getGlobalBlockAt(glm::floor(q.x), glm::floor(q.y), glm::floor(q.z));
+            return b != EMPTY && b != WATER && b != LAVA;
+        };
+        // The whole box must be tested, not just the center column: a
+        // teleport or noclip-exit can leave only a corner inside a wall,
+        // which would wedge every movement axis at zero
+        auto boxEmbedded = [&solidAt](glm::vec3 base) -> bool {
+            const float r = 0.29f;
+            for (float h : {0.05f, 1.05f, 1.95f}) {
+                for (int sx = -1; sx <= 1; sx += 2) {
+                    for (int sz = -1; sz <= 1; sz += 2) {
+                        if (solidAt(base + glm::vec3(sx * r, h, sz * r))) {
+                            return true;
+                        }
+                    }
+                }
+            }
+            return false;
+        };
+        int unstuckGuard = 0;
+        while (unstuckGuard++ < 80 && boxEmbedded(m_position)) {
+            m_position.y += 1.f;
+            m_velocity.y = 0.f;
+        }
+
+        // The collision volume is two stacked blocks tall but 0.6 wide like
+        // Minecraft's real player box, so the player fits into 1-block
+        // holes (digging straight down!) and slides through tight tunnels
+        // without snagging. Corners of the box are sampled at 3 heights.
+        const float R = 0.3f;
         std::vector<glm::vec3> playerBlockpoints = {
-            m_position + glm::vec3(0.5f, 0.f, 0.5f), // bottom of bottom block
-            m_position + glm::vec3(0.5f, 1.f, 0.5f), // top of bottom / bottom of top block
-            m_position + glm::vec3(0.5f, 2.f, 0.5f), // top of top block
-            m_position + glm::vec3(-0.5f, 0.f, 0.5f),
-            m_position + glm::vec3(-0.5f, 1.f, 0.5f),
-            m_position + glm::vec3(-0.5f, 2.f, 0.5f),
-            m_position + glm::vec3(0.5f, 0.f, -0.5f),
-            m_position + glm::vec3(0.5f, 1.f, -0.5f),
-            m_position + glm::vec3(0.5f, 2.f, -0.5f),
-            m_position + glm::vec3(-0.5f, 0.f, -0.5f),
-            m_position + glm::vec3(-0.5f, 1.f, -0.5f),
-            m_position + glm::vec3(-0.5f, 2.f, -0.5f),
+            m_position + glm::vec3( R, 0.f,  R),
+            m_position + glm::vec3( R, 1.f,  R),
+            m_position + glm::vec3( R, 2.f,  R),
+            m_position + glm::vec3(-R, 0.f,  R),
+            m_position + glm::vec3(-R, 1.f,  R),
+            m_position + glm::vec3(-R, 2.f,  R),
+            m_position + glm::vec3( R, 0.f, -R),
+            m_position + glm::vec3( R, 1.f, -R),
+            m_position + glm::vec3( R, 2.f, -R),
+            m_position + glm::vec3(-R, 0.f, -R),
+            m_position + glm::vec3(-R, 1.f, -R),
+            m_position + glm::vec3(-R, 2.f, -R),
         };
         // maintaining a stuck var coz this will help me slide over walls or obstacles later
         bool stuck = true;
@@ -161,23 +268,19 @@ void Player::computePhysics(float dT, const Terrain &terrain) {
                     //the type of block well be at
                     BlockType terrainblock = terrain.getGlobalBlockAt(floor(cornerPos.x), floor(cornerPos.y), floor(cornerPos.z));
 
-                    // skip if blocks are empty or water considering i can traverse through them, can also add more blocks here based on terrain
-                    if (terrainblock==EMPTY || terrainblock==WATER){
+                    // Fluids don't block movement - the player swims
+                    // through water and lava at reduced speed instead
+                    if (terrainblock==EMPTY || terrainblock==WATER || terrainblock==LAVA){
                         distanceTravelled += resolution;
                         continue;
                     }
 
                     //if collision
-                    else if (terrainblock!=EMPTY){
-                        if(std::abs(distanceTravelled) < std::abs(actualDistance)){
-                            // other blocks considered obstacle and hence actual traversable path would just be this
-                            actualDistance = distanceTravelled;
-                        }
-                        break;
+                    if(std::abs(distanceTravelled) < std::abs(actualDistance)){
+                        // other blocks considered obstacle and hence actual traversable path would just be this
+                        actualDistance = distanceTravelled;
                     }
-
-                    //if no collision, keep moving further
-                    distanceTravelled += resolution;
+                    break;
                 }
             }
 
@@ -190,27 +293,33 @@ void Player::computePhysics(float dT, const Terrain &terrain) {
             computedPosition[axis] = m_position[axis] + actualDistance;
             if (axis==1) toMove = actualDistance;
         }
-        // if stuck slide across the wall until u can actually move
-        if (stuck && m_velocity!=glm::vec3(0.f)) toMove += 0.01f;
+        // (a legacy "nudge upward when wedged" hack lived here; the 0.6-wide
+        // box plus the de-embed pass above make it unnecessary, and it made
+        // the camera vibrate when pressing into corners)
+        (void)stuck;
         // moveForwardLocal(computedPosition.z);
         // moveRightLocal(computedPosition.x);
-        moveUpLocal(toMove);
+        // Vertical movement is along the WORLD up axis - the local up tilts
+        // with the camera pitch, which used to slow falling and jumping to
+        // a crawl whenever the player looked up or down
+        m_position.y += toMove;
         m_position.x = computedPosition.x;
         m_position.z = computedPosition.z;
     }
 }
 
-void Player::removeAddBlock(bool right, bool left, Terrain &terrain, float shootingRange){
-
-
-    // std::cout<<"Block will be removed or added if it's in 3units distance !!";
+// Grid-march a ray from the camera through the crosshair. Left click
+// removes the first block hit; right click places a copy of it in the cell
+// the ray passed through just before the hit. setGlobalBlockAt re-meshes
+// and re-uploads the affected chunks.
+BlockType Player::removeAddBlock(bool right, bool left, Terrain &terrain, float shootingRange,
+                                 BlockType placeType){
     // can adjust resolution based on performance
     float resolution = 0.2f;
     float distTravelled = 0.f;
     //camera centre of top block
     glm::vec3 cameraDir = glm::normalize(m_forward);
-    glm::vec3 cameraOrig = m_position + glm::vec3(0.f, 1.5f, 0.f);
-    glm::vec3 position = cameraOrig; // start with orig
+    glm::vec3 position = m_position + glm::vec3(0.f, 1.5f, 0.f);
 
     //default shooting range is 3 units, but adding a way to increase the range for fun!
     while(distTravelled < shootingRange){
@@ -221,37 +330,60 @@ void Player::removeAddBlock(bool right, bool left, Terrain &terrain, float shoot
             continue;
         }
         BlockType currentBlock = terrain.getGlobalBlockAt(floorPos);
-        if (currentBlock!=EMPTY){
+        // Clicks target solid blocks only - the ray passes through fluids,
+        // so you can't "break" water or place copies of it
+        if (currentBlock!=EMPTY && currentBlock!=WATER && currentBlock!=LAVA){
+            // Right-clicking a lever flips it instead of placing a block
+            if (right && (currentBlock == LEVER_OFF || currentBlock == LEVER_ON)) {
+                terrain.setGlobalBlockAt(floorPos.x, floorPos.y, floorPos.z,
+                                         currentBlock == LEVER_OFF ? LEVER_ON : LEVER_OFF);
+                return currentBlock;
+            }
             if (right){
                 //place a block one step before the block identified
-                // std::cout<<"adding block !!";
                 glm::vec3 newBlockPos = glm::floor(position - cameraDir*resolution);
-                terrain.setGlobalBlockAt(newBlockPos.x, newBlockPos.y, newBlockPos.z, currentBlock);
-                // send VBO data
-                if (terrain.hasChunkAt(glm::floor(newBlockPos.x / 16) * 16,
-                                       glm::floor(newBlockPos.z / 16) * 16
-                                       )){
-                    terrain.getChunkAt(glm::floor(newBlockPos.x / 16) * 16,
-                                       glm::floor(newBlockPos.z / 16) * 16
-                                       )->createVBOdata();
+                // Never place a block through the player's head, and only
+                // into the feet cell when jumping mostly clear of it - the
+                // embedded-in-terrain pop then lands you on top, which is
+                // exactly how pillaring up feels in Minecraft
+                glm::vec3 feet = glm::floor(m_position);
+                glm::vec3 head = glm::floor(m_position + glm::vec3(0.f, 1.f, 0.f));
+                bool blockedByPlayer =
+                    (newBlockPos == head) ||
+                    (newBlockPos == feet && m_position.y - newBlockPos.y <= 0.45f);
+                if (!blockedByPlayer) {
+                    terrain.setGlobalBlockAt(newBlockPos.x, newBlockPos.y, newBlockPos.z, placeType);
+                    return placeType;
                 }
-            } else if (left){
-                // std::cout<<"removing block !!";
+            } else if (left && currentBlock != BEDROCK){
+                // Bedrock is unbreakable
                 terrain.setGlobalBlockAt(floorPos.x, floorPos.y, floorPos.z, EMPTY);
-                //SEND vbo data to update this
-                if (terrain.hasChunkAt(glm::floor(floorPos.x / 16) * 16,
-                                       glm::floor(floorPos.z / 16) * 16
-                                       )){
-                    terrain.getChunkAt(glm::floor(floorPos.x / 16) * 16,
-                                       glm::floor(floorPos.z / 16) * 16
-                                       )->createVBOdata();
-                }
+                return currentBlock;
             }
             break;
         }
         distTravelled += resolution;
         position += resolution*cameraDir;
     }
+    return EMPTY;
+}
+
+bool Player::raycastBlock(const Terrain &terrain, glm::ivec3 &outBlock) const {
+    const float resolution = 0.1f;
+    glm::vec3 dir = glm::normalize(m_forward);
+    glm::vec3 position = m_position + glm::vec3(0.f, 1.5f, 0.f);
+    for (float dist = 0.f; dist < shootingRange; dist += resolution) {
+        glm::vec3 floorPos = glm::floor(position);
+        if (terrain.hasChunkAt(floorPos.x, floorPos.z)) {
+            BlockType b = terrain.getGlobalBlockAt(floorPos);
+            if (b != EMPTY && b != WATER) {
+                outBlock = glm::ivec3(floorPos);
+                return true;
+            }
+        }
+        position += resolution * dir;
+    }
+    return false;
 }
 
 
@@ -292,6 +424,10 @@ void Player::rotateOnForwardLocal(float degrees) {
     m_camera.rotateOnForwardLocal(degrees);
 }
 void Player::rotateOnRightLocal(float degrees) {
+    // Clamp look pitch so the camera can never flip past straight up/down
+    float newPitch = std::clamp(m_pitchDegrees + degrees, -89.f, 89.f);
+    degrees = newPitch - m_pitchDegrees;
+    m_pitchDegrees = newPitch;
     Entity::rotateOnRightLocal(degrees);
     m_camera.rotateOnRightLocal(degrees);
 }
