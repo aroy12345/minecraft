@@ -1,0 +1,5 @@
+<RCC>
+    <qresource prefix="/">
+        <file alias="sounds/baah.wav">baah.wav</file>
+    </qresource>
+</RCC>

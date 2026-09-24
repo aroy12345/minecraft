@@ -4,9 +4,12 @@
         <file>glsl/lambert.vert.glsl</file>
         <file>glsl/flat.frag.glsl</file>
         <file>glsl/flat.vert.glsl</file>
-        <file>glsl/instanced.vert.glsl</file>
         <file>textures/minecraft_textures_all.png</file>
         <file>glsl/post.frag.glsl</file>
+        <file>glsl/shadow.vert.glsl</file>
+        <file>glsl/shadow.frag.glsl</file>
+        <file>glsl/hud.vert.glsl</file>
+        <file>glsl/hud.frag.glsl</file>
         <file>glsl/post.vert.glsl</file>
         <file>glsl/sky.frag.glsl</file>
         <file>glsl/sky.vert.glsl</file>
