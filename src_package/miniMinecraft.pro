@@ -14,6 +14,11 @@ CONFIG += debug
 
 INCLUDEPATH += include
 
+# macOS deprecated the OpenGL API in 10.14; we still target it deliberately
+macx: DEFINES += GL_SILENCE_DEPRECATION
+# Raw mouse deltas for FPS-style mouse capture (CGGetLastMouseDelta)
+macx: LIBS += -framework ApplicationServices
+
 include(src/src.pri)
 
 FORMS += forms/mainwindow.ui \
@@ -52,7 +57,3 @@ address_sanitizer {
 HEADERS +=
 
 SOURCES +=
-
-DISTFILES += \
-    Nitha_Multi_threading \
-    Nithasree_Player_Plhysics
