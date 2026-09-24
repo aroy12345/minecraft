@@ -9,7 +9,7 @@
 #include "drawable.h"
 
 ShaderProgram::ShaderProgram(OpenGLContext *context)
-    : context(context), vertShader(), fragShader(), prog(), m_isReloading(false)
+    : vertShader(), fragShader(), prog(), context(context)
 {}
 
 void ShaderProgram::destroy() {
@@ -111,7 +111,7 @@ void ShaderProgram::setUnifMat4(std::string name, const glm::mat4 &m) {
         }
     }
     catch(std::out_of_range &e) {
-        std::cout << "Error: could not find shader variable with name " << name << std::endl;
+        // The shader simply doesn't use this uniform - not an error
     }
 }
 
@@ -123,7 +123,7 @@ void ShaderProgram::setUnifVec4(std::string name, const glm::vec4 &v) {
             context->glUniform4fv(handle, 1, &v[0]);
         }
     } catch (std::out_of_range &e) {
-        std::cout << "Error: could not find shader variable with name " << name << std::endl;
+        // The shader simply doesn't use this uniform - not an error
     }
 }
 
@@ -136,7 +136,7 @@ void ShaderProgram::setUnifVec2(std::string name, const glm::vec2 &v) {
         }
     }
     catch(std::out_of_range &e) {
-        std::cout << "Error: could not find shader variable with name " << name << std::endl;
+        // The shader simply doesn't use this uniform - not an error
     }
 }
 
@@ -149,7 +149,7 @@ void ShaderProgram::setUnifVec3(std::string name, const glm::vec3 &v) {
         }
     }
     catch(std::out_of_range &e) {
-        std::cout << "Error: could not find shader variable with name " << name << std::endl;
+        // The shader simply doesn't use this uniform - not an error
     }
 }
 
@@ -162,7 +162,7 @@ void ShaderProgram::setUnifFloat(std::string name, float f) {
         }
     }
     catch(std::out_of_range &e) {
-        std::cout << "Error: could not find shader variable with name " << name << std::endl;
+        // The shader simply doesn't use this uniform - not an error
     }
 }
 
@@ -175,7 +175,7 @@ void ShaderProgram::setUnifInt(std::string name, int i) {
         }
     }
     catch(std::out_of_range &e) {
-        std::cout << "Error: could not find shader variable with name " << name << std::endl;
+        // The shader simply doesn't use this uniform - not an error
     }
 }
 
@@ -188,7 +188,7 @@ void ShaderProgram::setUnifArrayInt(std::string name, int offset, int i) {
         }
     }
     catch(std::out_of_range &e) {
-        std::cout << "Error: could not find shader variable with name " << name << std::endl;
+        // The shader simply doesn't use this uniform - not an error
     }
 }
 
@@ -220,54 +220,12 @@ void ShaderProgram::draw(Drawable &d) {
     // This invokes the shader program, which accesses the vertex buffers.
     d.bindBuffer(INDEX);
     context->glDrawElements(d.drawMode(), d.elemCount(INDEX), GL_UNSIGNED_INT, 0);
-    if (m_attribs["vs_Pos"] != -1) context->glDisableVertexAttribArray(m_attribs["vs_Pos"]);
-    if (m_attribs["vs_Nor"] != -1) context->glDisableVertexAttribArray(m_attribs["vs_Nor"]);
-    if (m_attribs["vs_Col"] != -1) context->glDisableVertexAttribArray(m_attribs["vs_Col"]);
-    if (m_attribs["vs_UV"] != -1) context->glDisableVertexAttribArray(m_attribs["vs_UV"]);
-    // context->printGLErrorLog();
-}
-
-void ShaderProgram::drawInstanced(InstancedDrawable &d) {
-    if(d.elemCount(INDEX) < 0) {
-        throw std::invalid_argument(
-            "Attempting to draw a Drawable that has not initialized its count variable! Remember to set it to the length of your index array in create()."
-            );
+    for (const char *n : {"vs_Pos", "vs_Nor", "vs_Col", "vs_UV"}) {
+        auto it = m_attribs.find(n);
+        if (it != m_attribs.end() && it->second != -1) {
+            context->glDisableVertexAttribArray(it->second);
+        }
     }
-    useMe();
-    int handle;
-    if ((handle = m_attribs["vs_Pos"]) != -1 && d.bindBuffer(POSITION)) {
-        context->glEnableVertexAttribArray(handle);
-        context->glVertexAttribPointer(handle, 4, GL_FLOAT, false, 0, nullptr);
-        context->glVertexAttribDivisor(handle, 0);
-    }
-    if ((handle = m_attribs["vs_Nor"]) != -1 && d.bindBuffer(NORMAL)) {
-        context->glEnableVertexAttribArray(handle);
-        context->glVertexAttribPointer(handle, 4, GL_FLOAT, false, 0, nullptr);
-        context->glVertexAttribDivisor(handle, 0);
-    }
-    if ((handle = m_attribs["vs_ColInstanced"]) != -1 && d.bindBuffer(COLOR)) {
-        context->glEnableVertexAttribArray(handle);
-        context->glVertexAttribPointer(handle, 3, GL_FLOAT, false, 0, nullptr);
-        context->glVertexAttribDivisor(handle, 1);
-    }
-    if ((handle = m_attribs["vs_OffsetInstanced"]) != -1 && d.bindBuffer(INSTANCED_OFFSET)) {
-        context->glEnableVertexAttribArray(handle);
-        context->glVertexAttribPointer(handle, 3, GL_FLOAT, false, 0, nullptr);
-        context->glVertexAttribDivisor(handle, 1);
-    }
-    if ((handle = m_attribs["vs_UV"]) != -1 && d.bindBuffer(UV)) {
-        context->glEnableVertexAttribArray(handle);
-        context->glVertexAttribPointer(handle, 4, GL_FLOAT, GL_FALSE, 0, nullptr);
-    }
-    // Bind the index buffer and then draw shapes from it.
-    // This invokes the shader program, which accesses the vertex buffers.
-    d.bindBuffer(INDEX);
-    context->glDrawElementsInstanced(d.drawMode(), d.elemCount(INDEX), GL_UNSIGNED_INT, 0, d.instanceCount());
-    if (m_attribs["vs_Pos"] != -1) context->glDisableVertexAttribArray(m_attribs["vs_Pos"]);
-    if (m_attribs["vs_Nor"] != -1) context->glDisableVertexAttribArray(m_attribs["vs_Nor"]);
-    if (m_attribs["vs_ColInstanced"] != -1) context->glDisableVertexAttribArray(m_attribs["vs_ColInstanced"]);
-    if (m_attribs["vs_OffsetInstanced"] != -1) context->glDisableVertexAttribArray(m_attribs["vs_OffsetInstanced"]);
-    if (m_attribs["vs_UV"] != -1) context->glDisableVertexAttribArray(m_attribs["vs_UV"]);
     // context->printGLErrorLog();
 }
 
@@ -275,23 +233,30 @@ void ShaderProgram::drawInterleaved(Drawable &d,
                                     BufferType vboBuf,
                                     BufferType idxBuf) {
     useMe();
+    // Look attributes up without inserting: operator[] would create a 0
+    // entry for attributes the shader doesn't declare, silently rebinding
+    // attribute slot 0 (the positions!) to other data
+    auto attrib = [this](const char *name) {
+        auto it = m_attribs.find(name);
+        return it == m_attribs.end() ? -1 : it->second;
+    };
     const GLsizei stride = 4 * sizeof(glm::vec4); // pos,nor,col,uv each vec4
-    int hPos = m_attribs["vs_Pos"];
+    int hPos = attrib("vs_Pos");
     if (hPos != -1 && d.bindBuffer(vboBuf)) {
         context->glEnableVertexAttribArray(hPos);
         context->glVertexAttribPointer(hPos, 4, GL_FLOAT, GL_FALSE, stride, (void*)0);
     }
-    int hNor = m_attribs["vs_Nor"];
+    int hNor = attrib("vs_Nor");
     if (hNor != -1) {
         context->glEnableVertexAttribArray(hNor);
         context->glVertexAttribPointer(hNor, 4, GL_FLOAT, GL_FALSE, stride, (void*)(1*sizeof(glm::vec4)));
     }
-    int hCol = m_attribs["vs_Col"];
+    int hCol = attrib("vs_Col");
     if (hCol != -1) {
         context->glEnableVertexAttribArray(hCol);
         context->glVertexAttribPointer(hCol, 4, GL_FLOAT, GL_FALSE, stride, (void*)(2*sizeof(glm::vec4)));
     }
-    int hUV = m_attribs["vs_UV"];
+    int hUV = attrib("vs_UV");
     if (hUV != -1) {
         context->glEnableVertexAttribArray(hUV);
         context->glVertexAttribPointer(hUV, 4, GL_FLOAT, GL_FALSE, stride, (void*)(3*sizeof(glm::vec4)));
@@ -311,25 +276,6 @@ void ShaderProgram::drawOpaque(Drawable &d) {
 
 void ShaderProgram::drawTransparent(Drawable &d) {
     drawInterleaved(d, TRANSPARENT_INTERLEAVED, TRANSPARENT_INDEX);
-}
-
-char* ShaderProgram::textFileRead(const char* fileName) {
-    char* text = nullptr;
-    if (fileName != NULL) {
-        FILE *file = fopen(fileName, "rt");
-        if (file != NULL) {
-            fseek(file, 0, SEEK_END);
-            int count = ftell(file);
-            rewind(file);
-            if (count > 0) {
-                text = (char*)malloc(sizeof(char) * (count + 1));
-                count = fread(text, sizeof(char), count, file);
-                text[count] = '\0';	//cap off the string with a terminal symbol, fixed by Cory
-            }
-            fclose(file);
-        }
-    }
-    return text;
 }
 
 QString ShaderProgram::qTextFileRead(const char *fileName)

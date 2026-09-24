@@ -5,10 +5,13 @@
 
 in vec4 fs_Col;
 
+uniform vec4 u_Tint;   // multiplied with the vertex color (set to white
+                       // for untinted drawables like the axes/outline)
+
 out vec4 out_Col;
 
 void main()
 {
-    // Copy the color; there is no shading.
-    out_Col = fs_Col;
+    // Tinted vertex color; there is no shading.
+    out_Col = fs_Col * u_Tint;
 }

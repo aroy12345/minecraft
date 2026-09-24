@@ -85,13 +85,12 @@ void main(){
     // 4) combine sun+sky
     vec3 finalCol = max(diskCol, glowCol);
 
-    // 5) nighttime: stars + dark sky
+    // 5) nighttime: a clean dark-blue sky. (Screen-space "stars" used to be
+    // sprinkled here, but because they were keyed to the view ray they
+    // shimmered and crawled as the camera moved, reading as sparkly dots.)
     bool isNight = u_SunDirection.y < 0.0;
     if(isNight){
         finalCol = skyColor;
-        float seed = fract(sin(dot(rayDir.xy, vec2(12.9898,78.233))) * 43758.5453);
-        float star = smoothstep(0.995,1.0,seed) * mix(0.3,1.0,t);
-        finalCol += vec3(star);
     }
 
     // 6) clouds (only on sky half, but safe for rd.y<0)

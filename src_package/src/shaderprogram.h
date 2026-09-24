@@ -7,7 +7,6 @@
 #include "drawable.h"
 #include <unordered_map>
 
-#define dict std::unordered_map
 
 
 class ShaderProgram
@@ -17,10 +16,8 @@ public:
     GLuint fragShader; // A handle for the fragment shader stored in this shader program
     GLuint prog;       // A handle for the linked shader program stored in this class
 
-    dict<std::string, int> m_attribs;
-    dict<std::string, int> m_unifs;
-
-    bool m_isReloading;
+    std::unordered_map<std::string, int> m_attribs;
+    std::unordered_map<std::string, int> m_unifs;
 
 public:
     ShaderProgram(OpenGLContext* context);
@@ -50,18 +47,12 @@ public:
 
     // Draw the given object to our screen using this ShaderProgram's shaders
     void draw(Drawable &d);
-    void drawInstanced(InstancedDrawable &d);
-    //void drawInterleaved(Drawable &d);
     void drawInterleaved(Drawable &d,
                          BufferType vboBuf,
                          BufferType idxBuf);
     void drawOpaque(Drawable &d);
     void drawTransparent(Drawable &d);
 
-
-
-    // Utility function used in create()
-    char* textFileRead(const char*);
     // Utility function that prints any shader compilation errors to the console
     void printShaderInfoLog(int shader);
     // Utility function that prints any shader linking errors to the console
